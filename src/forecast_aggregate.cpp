@@ -5,6 +5,8 @@
 #include "timestral/time_grid.hpp"
 
 #include "duckdb/common/operator/cast_operators.hpp"
+#include "duckdb/common/serializer/deserializer.hpp"
+#include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/execution/expression_executor.hpp"
@@ -56,6 +58,8 @@ struct ForecastBindData : public FunctionData {
 	GridStep step;
 	//! Series forecast in parallel per finalize call (DuckDB's `threads` setting at bind time).
 	idx_t parallelism = 1;
+	//! Model size as given (setting or options); kept to restore the predictor after deserialization.
+	string model;
 	shared_ptr<BlockPredictor> predictor;
 
 	unique_ptr<FunctionData> Copy() const override {
@@ -65,6 +69,7 @@ struct ForecastBindData : public FunctionData {
 		copy->has_step = has_step;
 		copy->step = step;
 		copy->parallelism = parallelism;
+		copy->model = model;
 		copy->predictor = predictor;
 		return std::move(copy);
 	}
@@ -478,8 +483,43 @@ static unique_ptr<FunctionData> ForecastBind(ClientContext &context, AggregateFu
 		Function::EraseArgument(function, arguments, 3);
 	}
 	// The model is resolved (and downloaded if needed) at bind time, so a missing model fails the query early.
+	bind->model = model;
 	bind->predictor = ModelStore::Instance().GetPredictor(context, model);
 	Function::EraseArgument(function, arguments, 2);
+	function.return_type = ForecastEntryType(bind->ts_type);
+	return std::move(bind);
+}
+
+// Bind erases the constant horizon/options arguments, so plans are (de)serialized with the bind data instead of
+// being re-bound.
+static void ForecastSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data_p,
+                              const AggregateFunction &) {
+	auto &bind = bind_data_p->Cast<ForecastBindData>();
+	serializer.WriteProperty(100, "horizon", bind.horizon);
+	serializer.WriteProperty(101, "ts_type", bind.ts_type);
+	serializer.WriteProperty(102, "has_step", bind.has_step);
+	serializer.WriteProperty(103, "step_is_interval", bind.step.is_interval);
+	serializer.WriteProperty(104, "step_width", bind.step.width);
+	serializer.WriteProperty(105, "step_months", bind.step.interval.months);
+	serializer.WriteProperty(106, "step_days", bind.step.interval.days);
+	serializer.WriteProperty(107, "step_micros", bind.step.interval.micros);
+	serializer.WriteProperty(108, "model", bind.model);
+}
+
+static unique_ptr<FunctionData> ForecastDeserialize(Deserializer &deserializer, AggregateFunction &function) {
+	auto &context = deserializer.Get<ClientContext &>();
+	auto bind = make_uniq<ForecastBindData>();
+	bind->horizon = deserializer.ReadProperty<idx_t>(100, "horizon");
+	bind->ts_type = deserializer.ReadProperty<LogicalType>(101, "ts_type");
+	bind->has_step = deserializer.ReadProperty<bool>(102, "has_step");
+	bind->step.is_interval = deserializer.ReadProperty<bool>(103, "step_is_interval");
+	bind->step.width = deserializer.ReadProperty<int64_t>(104, "step_width");
+	bind->step.interval.months = deserializer.ReadProperty<int32_t>(105, "step_months");
+	bind->step.interval.days = deserializer.ReadProperty<int32_t>(106, "step_days");
+	bind->step.interval.micros = deserializer.ReadProperty<int64_t>(107, "step_micros");
+	bind->model = deserializer.ReadProperty<string>(108, "model");
+	bind->parallelism = MaxValue<idx_t>(NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads()), 1);
+	bind->predictor = ModelStore::Instance().GetPredictor(context, bind->model);
 	function.return_type = ForecastEntryType(bind->ts_type);
 	return std::move(bind);
 }
@@ -497,6 +537,8 @@ void RegisterForecastAggregate(ExtensionLoader &loader) {
 			                           ForecastUpdate, ForecastCombine, ForecastFinalize,
 			                           FunctionNullHandling::SPECIAL_HANDLING, nullptr, ForecastBind, ForecastDestroy);
 			function.name = "timestral_forecast";
+			function.SetSerializeCallback(ForecastSerialize);
+			function.SetDeserializeCallback(ForecastDeserialize);
 			function.SetOrderDependent(AggregateOrderDependent::NOT_ORDER_DEPENDENT);
 			set.AddFunction(function);
 		}
