@@ -5,6 +5,8 @@
 #include "timestral/time_grid.hpp"
 
 #include "duckdb/common/operator/cast_operators.hpp"
+#include "duckdb/common/types/date.hpp"
+#include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/function/aggregate_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -16,6 +18,7 @@ namespace duckdb {
 namespace timestral {
 
 static constexpr int64_t MAX_HORIZON = 100000;
+static constexpr int64_t MICROS_PER_DAY = 86400000000LL;
 static const char *const QUANTILE_FIELDS[NUM_QUANTILES] = {"q01", "q05", "q10", "q15", "q20", "q25", "q30",
                                                            "q35", "q40", "q45", "q50", "q55", "q60", "q65",
                                                            "q70", "q75", "q80", "q85", "q90", "q95", "q99"};
@@ -28,21 +31,38 @@ static LogicalType ForecastEntryType(const LogicalType &ts_type) {
 	return LogicalType::LIST(LogicalType::STRUCT(std::move(fields)));
 }
 
+static bool IsTemporal(const LogicalType &type) {
+	switch (type.id()) {
+	case LogicalTypeId::DATE:
+	case LogicalTypeId::TIMESTAMP:
+	case LogicalTypeId::TIMESTAMP_TZ:
+		return true;
+	default:
+		return false;
+	}
+}
+
 struct ForecastBindData : public FunctionData {
 	idx_t horizon = 0;
 	LogicalType ts_type;
+	bool has_step = false;
+	GridStep step;
 	shared_ptr<BlockPredictor> predictor;
 
 	unique_ptr<FunctionData> Copy() const override {
 		auto copy = make_uniq<ForecastBindData>();
 		copy->horizon = horizon;
 		copy->ts_type = ts_type;
+		copy->has_step = has_step;
+		copy->step = step;
 		copy->predictor = predictor;
 		return std::move(copy);
 	}
 	bool Equals(const FunctionData &other_p) const override {
 		auto &other = other_p.Cast<ForecastBindData>();
-		return horizon == other.horizon && ts_type == other.ts_type && predictor == other.predictor;
+		return horizon == other.horizon && ts_type == other.ts_type && has_step == other.has_step &&
+		       step.is_interval == other.step.is_interval && step.width == other.step.width &&
+		       step.interval == other.step.interval && predictor == other.predictor;
 	}
 };
 
@@ -52,7 +72,7 @@ struct ForecastState {
 };
 
 //===--------------------------------------------------------------------===//
-// Timestamp conversion between the SQL type and the grid's int64 representation
+// Timestamps: INTEGER/BIGINT as is, temporal types as epoch micros
 //===--------------------------------------------------------------------===//
 static int64_t ReadTimestamp(const UnifiedVectorFormat &format, const LogicalType &type, idx_t idx) {
 	switch (type.id()) {
@@ -60,6 +80,21 @@ static int64_t ReadTimestamp(const UnifiedVectorFormat &format, const LogicalTyp
 		return UnifiedVectorFormat::GetData<int32_t>(format)[idx];
 	case LogicalTypeId::BIGINT:
 		return UnifiedVectorFormat::GetData<int64_t>(format)[idx];
+	case LogicalTypeId::DATE: {
+		auto date = UnifiedVectorFormat::GetData<date_t>(format)[idx];
+		if (!Date::IsFinite(date)) {
+			throw InvalidInputException("timestral: infinite dates are not supported");
+		}
+		return Timestamp::FromDatetime(date, dtime_t(0)).value;
+	}
+	case LogicalTypeId::TIMESTAMP:
+	case LogicalTypeId::TIMESTAMP_TZ: {
+		auto ts = UnifiedVectorFormat::GetData<timestamp_t>(format)[idx];
+		if (!Timestamp::IsFinite(ts)) {
+			throw InvalidInputException("timestral: infinite timestamps are not supported");
+		}
+		return ts.value;
+	}
 	default:
 		throw InternalException("timestral: unsupported ts type %s", type.ToString());
 	}
@@ -76,13 +111,28 @@ static Value TimestampValue(const LogicalType &type, int64_t ts) {
 	}
 	case LogicalTypeId::BIGINT:
 		return Value::BIGINT(ts);
+	case LogicalTypeId::DATE:
+		return Value::DATE(Timestamp::GetDate(timestamp_t(ts)));
+	case LogicalTypeId::TIMESTAMP:
+		return Value::TIMESTAMP(timestamp_t(ts));
+	case LogicalTypeId::TIMESTAMP_TZ:
+		return Value::TIMESTAMPTZ(timestamp_tz_t(ts));
 	default:
 		throw InternalException("timestral: unsupported ts type %s", type.ToString());
 	}
 }
 
-static string FormatTimestamp(const LogicalType &type, int64_t ts) {
-	return to_string(ts);
+static string OffGridHint(const LogicalType &type) {
+	if (!IsTemporal(type)) {
+		return "pass freq or use time_bucket";
+	}
+	string hint = "pass an explicit freq, e.g. {'freq': INTERVAL '1 month'} (calendar frequencies are not "
+	              "inferred), or use time_bucket";
+	if (type.id() == LogicalTypeId::TIMESTAMP_TZ) {
+		hint += ". TIMESTAMPTZ values are UTC instants, so local-time data shifts across daylight saving changes: "
+		        "cast to TIMESTAMP in the local time zone first, or use time_bucket";
+	}
+	return hint;
 }
 
 //===--------------------------------------------------------------------===//
@@ -143,8 +193,15 @@ static void FinalizeOne(ForecastState &state, const ForecastBindData &bind, Vect
 		return;
 	}
 	const auto &config = DefaultModelConfig();
-	auto grid = BuildGrid(*state.rows, nullptr, config.context_length,
-	                      [&](int64_t ts) { return FormatTimestamp(bind.ts_type, ts); });
+	GridOptions options;
+	options.explicit_step = bind.has_step ? &bind.step : nullptr;
+	options.temporal = IsTemporal(bind.ts_type);
+	options.context_length = config.context_length;
+	options.format_ts = [&](int64_t ts) {
+		return TimestampValue(bind.ts_type, ts).ToString();
+	};
+	options.off_grid_hint = OffGridHint(bind.ts_type);
+	auto grid = BuildGrid(*state.rows, options);
 	std::vector<float> quantiles;
 	if (!grid.ok || !ForecastSeries(*bind.predictor, config, grid.context, bind.horizon, ForecastOptions(), quantiles)) {
 		FlatVector::SetNull(result, result_idx, true);
@@ -155,8 +212,8 @@ static void FinalizeOne(ForecastState &state, const ForecastBindData &bind, Vect
 	auto &entries = StructVector::GetEntries(ListVector::GetEntry(result));
 	for (idx_t h = 0; h < bind.horizon; h++) {
 		auto row = offset + h;
-		entries[0]->SetValue(row, TimestampValue(bind.ts_type, GridPoint(grid.last_point, grid.step,
-		                                                                 static_cast<int64_t>(h + 1))));
+		auto ts = GridPoint(grid.last_point, grid.step, static_cast<int64_t>(h + 1));
+		entries[0]->SetValue(row, TimestampValue(bind.ts_type, ts));
 		auto q = quantiles.data() + h * NUM_QUANTILES;
 		FlatVector::GetData<double>(*entries[1])[row] = q[config.median_index];
 		for (idx_t k = 0; k < NUM_QUANTILES; k++) {
@@ -190,9 +247,49 @@ static void ForecastDestroy(Vector &states, AggregateInputData &, idx_t count) {
 	}
 }
 
+//===--------------------------------------------------------------------===//
+// Bind
+//===--------------------------------------------------------------------===//
+static GridStep ParseFreq(const Value &freq, const LogicalType &ts_type) {
+	GridStep step;
+	if (!IsTemporal(ts_type)) {
+		if (!freq.type().IsIntegral()) {
+			throw BinderException("timestral: freq for integer time steps must be an integer");
+		}
+		step.width = freq.GetValue<int64_t>();
+		if (step.width <= 0) {
+			throw BinderException("timestral: freq must be positive");
+		}
+		return step;
+	}
+	if (freq.type().id() != LogicalTypeId::INTERVAL) {
+		throw BinderException("timestral: freq for %s values must be an INTERVAL", ts_type.ToString());
+	}
+	auto interval = freq.GetValue<interval_t>();
+	step.is_interval = true;
+	step.interval = interval;
+	if (interval.months != 0) {
+		if (interval.days != 0 || interval.micros != 0) {
+			throw BinderException("timestral: freq must be either a fixed duration or a whole number of months");
+		}
+		if (interval.months < 0) {
+			throw BinderException("timestral: freq must be positive");
+		}
+		return step;
+	}
+	if (!Interval::TryGetMicro(interval, step.width) || step.width <= 0) {
+		throw BinderException("timestral: freq must be positive");
+	}
+	if (ts_type.id() == LogicalTypeId::DATE && step.width % MICROS_PER_DAY != 0) {
+		throw BinderException("timestral: freq for DATE values must be a whole number of days or months");
+	}
+	return step;
+}
+
 static unique_ptr<FunctionData> ForecastBind(ClientContext &context, AggregateFunction &function,
                                              vector<unique_ptr<Expression>> &arguments) {
 	auto bind = make_uniq<ForecastBindData>();
+	bind->ts_type = arguments[0]->return_type;
 	auto &horizon_expr = *arguments[2];
 	if (!horizon_expr.IsFoldable()) {
 		throw BinderException("timestral: horizon must be a constant");
@@ -206,9 +303,36 @@ static unique_ptr<FunctionData> ForecastBind(ClientContext &context, AggregateFu
 		throw BinderException("timestral: horizon must be between 1 and %lld, got %lld", MAX_HORIZON, horizon_value);
 	}
 	bind->horizon = static_cast<idx_t>(horizon_value);
-	bind->ts_type = arguments[0]->return_type;
+
+	auto model = GetStringSetting(context, "timestral_model");
+	if (arguments.size() > 3) {
+		auto &options_expr = *arguments[3];
+		if (!options_expr.IsFoldable() || options_expr.return_type.id() != LogicalTypeId::STRUCT) {
+			throw BinderException("timestral: options must be a constant STRUCT, e.g. {'freq': INTERVAL '1 hour'}");
+		}
+		auto options = ExpressionExecutor::EvaluateScalar(context, options_expr);
+		auto &fields = StructType::GetChildTypes(options.type());
+		auto &values = StructValue::GetChildren(options);
+		for (idx_t i = 0; i < fields.size(); i++) {
+			auto key = StringUtil::Lower(fields[i].first);
+			auto &value = values[i];
+			if (key == "model") {
+				if (!value.IsNull()) {
+					model = value.ToString();
+				}
+			} else if (key == "freq") {
+				if (!value.IsNull()) {
+					bind->step = ParseFreq(value, bind->ts_type);
+					bind->has_step = true;
+				}
+			} else {
+				throw BinderException("timestral: unknown option '%s' (valid options: model, freq)", fields[i].first);
+			}
+		}
+		Function::EraseArgument(function, arguments, 3);
+	}
 	// The model is resolved (and downloaded if needed) at bind time, so a missing model fails the query early.
-	bind->predictor = ModelStore::Instance().GetPredictor(context, GetStringSetting(context, "timestral_model"));
+	bind->predictor = ModelStore::Instance().GetPredictor(context, model);
 	Function::EraseArgument(function, arguments, 2);
 	function.return_type = ForecastEntryType(bind->ts_type);
 	return std::move(bind);
@@ -216,13 +340,20 @@ static unique_ptr<FunctionData> ForecastBind(ClientContext &context, AggregateFu
 
 void RegisterForecastAggregate(ExtensionLoader &loader) {
 	AggregateFunctionSet set("timestral_forecast");
-	for (auto &ts_type : {LogicalType::BIGINT, LogicalType::INTEGER}) {
-		AggregateFunction function({ts_type, LogicalType::DOUBLE, LogicalType::BIGINT}, ForecastEntryType(ts_type),
-		                           ForecastStateSize, ForecastInitialize, ForecastUpdate, ForecastCombine,
-		                           ForecastFinalize, FunctionNullHandling::SPECIAL_HANDLING, nullptr, ForecastBind,
-		                           ForecastDestroy);
-		function.SetOrderDependent(AggregateOrderDependent::NOT_ORDER_DEPENDENT);
-		set.AddFunction(function);
+	for (auto &ts_type : {LogicalType::BIGINT, LogicalType::INTEGER, LogicalType::DATE, LogicalType::TIMESTAMP,
+	                      LogicalType::TIMESTAMP_TZ}) {
+		for (bool with_options : {false, true}) {
+			vector<LogicalType> arguments {ts_type, LogicalType::DOUBLE, LogicalType::BIGINT};
+			if (with_options) {
+				arguments.push_back(LogicalType::ANY);
+			}
+			AggregateFunction function(arguments, ForecastEntryType(ts_type), ForecastStateSize, ForecastInitialize,
+			                           ForecastUpdate, ForecastCombine, ForecastFinalize,
+			                           FunctionNullHandling::SPECIAL_HANDLING, nullptr, ForecastBind, ForecastDestroy);
+			function.name = "timestral_forecast";
+			function.SetOrderDependent(AggregateOrderDependent::NOT_ORDER_DEPENDENT);
+			set.AddFunction(function);
+		}
 	}
 	loader.RegisterFunction(set);
 }
