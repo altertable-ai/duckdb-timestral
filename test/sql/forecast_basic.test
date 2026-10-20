@@ -90,3 +90,26 @@ SELECT count(*), count(f) FROM (
   SELECT g, timestral_forecast(i, (g % 7) + sin(i / 3.0), 4) AS f FROM range(2000) a(g), range(100) b(i) GROUP BY g);
 ----
 2000	2000
+
+# forecasts are identical whatever the parallelism, and errors raised while forecasting in parallel surface
+statement ok
+CREATE TABLE many AS SELECT g, i AS t, (g % 13) + sin(i / (2 + g % 5)) AS v FROM range(300) a(g), range(150) b(i);
+
+statement ok
+SET threads = 1;
+
+statement ok
+CREATE TABLE serial AS SELECT g, timestral_forecast(t, v, 40) AS f FROM many GROUP BY g;
+
+statement ok
+SET threads = 8;
+
+query I
+SELECT count(*) = 300 AND bool_and(s.f = p.f) FROM serial s JOIN (SELECT g, timestral_forecast(t, v, 40) AS f FROM many GROUP BY g) p USING (g);
+----
+true
+
+statement error
+SELECT g, timestral_forecast(CASE WHEN g = 123 AND t = 7 THEN 8 ELSE t END, v, 4) FROM many GROUP BY g;
+----
+Invalid Input Error: timestral: duplicate timestamp 8 in one series

@@ -10,9 +10,14 @@
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/function/aggregate_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/planner/expression.hpp"
 
+#include <atomic>
 #include <cmath>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 
 namespace duckdb {
 namespace timestral {
@@ -47,6 +52,8 @@ struct ForecastBindData : public FunctionData {
 	LogicalType ts_type;
 	bool has_step = false;
 	GridStep step;
+	//! Series forecast in parallel per finalize call (DuckDB's `threads` setting at bind time).
+	idx_t parallelism = 1;
 	shared_ptr<BlockPredictor> predictor;
 
 	unique_ptr<FunctionData> Copy() const override {
@@ -55,6 +62,7 @@ struct ForecastBindData : public FunctionData {
 		copy->ts_type = ts_type;
 		copy->has_step = has_step;
 		copy->step = step;
+		copy->parallelism = parallelism;
 		copy->predictor = predictor;
 		return std::move(copy);
 	}
@@ -187,9 +195,15 @@ static void ForecastCombine(Vector &source, Vector &target, AggregateInputData &
 	}
 }
 
-static void FinalizeOne(ForecastState &state, const ForecastBindData &bind, Vector &result, idx_t result_idx) {
+//! The forecast of one series, computed before it is written to the result vector.
+struct SeriesForecast {
+	bool ok = false;
+	GridSeries grid;
+	std::vector<float> quantiles;
+};
+
+static void ComputeForecast(ForecastState &state, const ForecastBindData &bind, SeriesForecast &out) {
 	if (!state.rows) {
-		FlatVector::SetNull(result, result_idx, true);
 		return;
 	}
 	const auto &config = DefaultModelConfig();
@@ -201,20 +215,26 @@ static void FinalizeOne(ForecastState &state, const ForecastBindData &bind, Vect
 		return TimestampValue(bind.ts_type, ts).ToString();
 	};
 	options.off_grid_hint = OffGridHint(bind.ts_type);
-	auto grid = BuildGrid(*state.rows, options);
-	std::vector<float> quantiles;
-	if (!grid.ok || !ForecastSeries(*bind.predictor, config, grid.context, bind.horizon, ForecastOptions(), quantiles)) {
+	out.grid = BuildGrid(*state.rows, options);
+	out.ok = out.grid.ok &&
+	         ForecastSeries(*bind.predictor, config, out.grid.context, bind.horizon, ForecastOptions(), out.quantiles);
+}
+
+static void WriteForecast(const SeriesForecast &forecast, const ForecastBindData &bind, Vector &result,
+                          idx_t result_idx) {
+	if (!forecast.ok) {
 		FlatVector::SetNull(result, result_idx, true);
 		return;
 	}
+	const auto &config = DefaultModelConfig();
 	auto offset = ListVector::GetListSize(result);
 	ListVector::Reserve(result, offset + bind.horizon);
 	auto &entries = StructVector::GetEntries(ListVector::GetEntry(result));
 	for (idx_t h = 0; h < bind.horizon; h++) {
 		auto row = offset + h;
-		auto ts = GridPoint(grid.last_point, grid.step, static_cast<int64_t>(h + 1));
+		auto ts = GridPoint(forecast.grid.last_point, forecast.grid.step, static_cast<int64_t>(h + 1));
 		entries[0]->SetValue(row, TimestampValue(bind.ts_type, ts));
-		auto q = quantiles.data() + h * NUM_QUANTILES;
+		auto q = forecast.quantiles.data() + h * NUM_QUANTILES;
 		FlatVector::GetData<double>(*entries[1])[row] = q[config.median_index];
 		for (idx_t k = 0; k < NUM_QUANTILES; k++) {
 			FlatVector::GetData<double>(*entries[2 + k])[row] = q[k];
@@ -224,19 +244,100 @@ static void FinalizeOne(ForecastState &state, const ForecastBindData &bind, Vect
 	FlatVector::GetData<list_entry_t>(result)[result_idx] = list_entry_t(offset, bind.horizon);
 }
 
+//! Caps the number of series forecast at the same time across all queries of the process, so parallel
+//! finalize calls (DuckDB may run several) never oversubscribe the CPU.
+class ForecastSlots {
+public:
+	static ForecastSlots &Instance() {
+		static ForecastSlots slots(MaxValue<idx_t>(std::thread::hardware_concurrency(), 1));
+		return slots;
+	}
+	void Acquire() {
+		std::unique_lock<std::mutex> guard(lock);
+		available.wait(guard, [&] { return free_slots > 0; });
+		free_slots--;
+	}
+	void Release() {
+		{
+			std::lock_guard<std::mutex> guard(lock);
+			free_slots++;
+		}
+		available.notify_one();
+	}
+
+private:
+	explicit ForecastSlots(idx_t slots) : free_slots(slots) {
+	}
+	std::mutex lock;
+	std::condition_variable available;
+	idx_t free_slots;
+};
+
+//! Forecasts `states[0..count)` using up to `bind.parallelism` threads, then writes them in order. DuckDB often
+//! finalizes all groups of a small hash table from a single thread, so the forecasts are parallelized here.
+static void FinalizeStates(ForecastState **states, idx_t count, const ForecastBindData &bind, Vector &result,
+                           idx_t offset) {
+	auto threads = MinValue<idx_t>(bind.parallelism, count);
+	// Bounded chunks keep at most a few forecasts per thread in memory (a horizon can be 100,000 steps).
+	auto chunk_size = MaxValue<idx_t>(threads * 4, 1);
+	std::vector<SeriesForecast> forecasts;
+	for (idx_t chunk_start = 0; chunk_start < count; chunk_start += chunk_size) {
+		auto chunk_count = MinValue<idx_t>(chunk_size, count - chunk_start);
+		forecasts.assign(chunk_count, SeriesForecast());
+		std::atomic<idx_t> next {0};
+		std::mutex error_lock;
+		ErrorData error;
+		auto work = [&]() {
+			while (true) {
+				auto i = next++;
+				if (i >= chunk_count) {
+					return;
+				}
+				{
+					std::lock_guard<std::mutex> guard(error_lock);
+					if (error.HasError()) {
+						return;
+					}
+				}
+				ForecastSlots::Instance().Acquire();
+				try {
+					ComputeForecast(*states[chunk_start + i], bind, forecasts[i]);
+				} catch (std::exception &ex) {
+					std::lock_guard<std::mutex> guard(error_lock);
+					if (!error.HasError()) {
+						error = ErrorData(ex);
+					}
+				}
+				ForecastSlots::Instance().Release();
+			}
+		};
+		std::vector<std::thread> workers;
+		for (idx_t t = 1; t < MinValue<idx_t>(threads, chunk_count); t++) {
+			workers.emplace_back(work);
+		}
+		work();
+		for (auto &worker : workers) {
+			worker.join();
+		}
+		if (error.HasError()) {
+			error.Throw();
+		}
+		for (idx_t i = 0; i < chunk_count; i++) {
+			WriteForecast(forecasts[i], bind, result, offset + chunk_start + i);
+		}
+	}
+}
+
 static void ForecastFinalize(Vector &states, AggregateInputData &aggr_input, Vector &result, idx_t count,
                              idx_t offset) {
 	auto &bind = aggr_input.bind_data->Cast<ForecastBindData>();
 	if (states.GetVectorType() == VectorType::CONSTANT_VECTOR) {
 		result.SetVectorType(VectorType::CONSTANT_VECTOR);
-		FinalizeOne(**ConstantVector::GetData<ForecastState *>(states), bind, result, 0);
+		FinalizeStates(ConstantVector::GetData<ForecastState *>(states), 1, bind, result, 0);
 		return;
 	}
 	D_ASSERT(result.GetVectorType() == VectorType::FLAT_VECTOR);
-	auto state_ptrs = FlatVector::GetData<ForecastState *>(states);
-	for (idx_t i = 0; i < count; i++) {
-		FinalizeOne(*state_ptrs[i], bind, result, i + offset);
-	}
+	FinalizeStates(FlatVector::GetData<ForecastState *>(states), count, bind, result, offset);
 }
 
 static void ForecastDestroy(Vector &states, AggregateInputData &, idx_t count) {
@@ -290,6 +391,7 @@ static unique_ptr<FunctionData> ForecastBind(ClientContext &context, AggregateFu
                                              vector<unique_ptr<Expression>> &arguments) {
 	auto bind = make_uniq<ForecastBindData>();
 	bind->ts_type = arguments[0]->return_type;
+	bind->parallelism = MaxValue<idx_t>(NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads()), 1);
 	auto &horizon_expr = *arguments[2];
 	if (!horizon_expr.IsFoldable()) {
 		throw BinderException("timestral: horizon must be a constant");
