@@ -25,10 +25,10 @@ struct OrtBlockPredictor::Impl {
 	Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 };
 
-OrtBlockPredictor::OrtBlockPredictor(const string &onnx_path, idx_t intra_op_threads) : impl(make_uniq<Impl>()) {
+OrtBlockPredictor::OrtBlockPredictor(const string &onnx_path) : impl(make_uniq<Impl>()) {
 	try {
 		Ort::SessionOptions options;
-		options.SetIntraOpNumThreads(NumericCast<int>(intra_op_threads));
+		options.SetIntraOpNumThreads(1);
 		options.SetInterOpNumThreads(1);
 		options.SetExecutionMode(ORT_SEQUENTIAL);
 		options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);

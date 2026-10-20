@@ -20,10 +20,11 @@ public:
 	                                        idx_t horizon_patches) = 0;
 };
 
-//! Runs an exported Timestral `.onnx` graph with ONNX Runtime (CPU). `PredictBlock` is thread-safe.
+//! Runs an exported Timestral `.onnx` graph with ONNX Runtime (CPU). `PredictBlock` is thread-safe and runs
+//! single-threaded: parallelism comes from DuckDB scheduling many forecasts at once.
 class OrtBlockPredictor : public BlockPredictor {
 public:
-	OrtBlockPredictor(const string &onnx_path, idx_t intra_op_threads);
+	explicit OrtBlockPredictor(const string &onnx_path);
 	~OrtBlockPredictor() override;
 
 	std::vector<float> PredictBlock(const std::vector<float> &inputs, const std::vector<uint8_t> &observed,

@@ -11,8 +11,8 @@ namespace timestral {
 
 struct ModelManifestEntry;
 
-//! Resolves, downloads, verifies and caches Timestral models, and keeps one ONNX Runtime session per
-//! (file, thread count) for the whole process.
+//! Resolves, downloads, verifies and caches Timestral models, and keeps one ONNX Runtime session per model file
+//! for the whole process.
 class ModelStore {
 public:
 	static ModelStore &Instance();

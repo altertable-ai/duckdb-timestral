@@ -102,13 +102,14 @@ Use `SET timestral_model = '28m'` to change the default, or pass `{'model': '28m
 
 ## Settings
 
+Forecasts run on DuckDB's own worker threads, one series per task, so `SET threads` controls the parallelism.
+
 | Setting | Default | Meaning |
 |---|---|---|
 | `timestral_model` | `'5m'` | Default model size. |
 | `timestral_model_url` | `'https://assets.altertable.ai/timestral/v1'` | Where model files are downloaded from. |
 | `timestral_cache_dir` | `'~/.duckdb/timestral/v1'` | Where downloaded models are cached. |
 | `timestral_model_path` | `''` | A local `.onnx` file to use instead of the download cache. No checksum check. |
-| `timestral_threads` | `1` | ONNX Runtime threads per forecast. Series are already forecast in parallel (one per DuckDB thread), so raise this only for a few long series on a large model. |
 
 ### Offline use
 

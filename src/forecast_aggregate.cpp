@@ -12,16 +12,12 @@
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/function/aggregate_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/main/database.hpp"
+#include "duckdb/parallel/task_executor.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/planner/expression.hpp"
 
-#include <atomic>
 #include <cmath>
-#include <condition_variable>
-#include <deque>
-#include <functional>
-#include <mutex>
-#include <thread>
 
 namespace duckdb {
 namespace timestral {
@@ -56,8 +52,8 @@ struct ForecastBindData : public FunctionData {
 	LogicalType ts_type;
 	bool has_step = false;
 	GridStep step;
-	//! Series forecast in parallel per finalize call (DuckDB's `threads` setting at bind time).
-	idx_t parallelism = 1;
+	//! The database whose task scheduler runs the forecasts.
+	weak_ptr<DatabaseInstance> db;
 	//! Model size as given (setting or options); kept to restore the predictor after deserialization.
 	string model;
 	shared_ptr<BlockPredictor> predictor;
@@ -68,7 +64,7 @@ struct ForecastBindData : public FunctionData {
 		copy->ts_type = ts_type;
 		copy->has_step = has_step;
 		copy->step = step;
-		copy->parallelism = parallelism;
+		copy->db = db;
 		copy->model = model;
 		copy->predictor = predictor;
 		return std::move(copy);
@@ -77,7 +73,7 @@ struct ForecastBindData : public FunctionData {
 		auto &other = other_p.Cast<ForecastBindData>();
 		return horizon == other.horizon && ts_type == other.ts_type && has_step == other.has_step &&
 		       step.is_interval == other.step.is_interval && step.width == other.step.width &&
-		       step.interval == other.step.interval && parallelism == other.parallelism && predictor == other.predictor;
+		       step.interval == other.step.interval && predictor == other.predictor;
 	}
 };
 
@@ -257,116 +253,48 @@ static void WriteForecast(const SeriesForecast &forecast, const ForecastBindData
 	FlatVector::GetData<list_entry_t>(result)[result_idx] = list_entry_t(offset, bind.horizon);
 }
 
-//! A process-wide pool of forecasting threads. DuckDB often finalizes all groups of a small hash table from a
-//! single thread, so the series of one finalize call are spread over this pool. Its size (the core count) bounds
-//! the threads created whatever the number of concurrent finalize calls. It is never destroyed: joining threads
-//! during process or DLL teardown can hang.
-class ForecastPool {
+//! Forecasts one series as a DuckDB task.
+class ForecastTask : public BaseExecutorTask {
 public:
-	static ForecastPool &Instance() {
-		static auto *pool = new ForecastPool();
-		return *pool;
+	ForecastTask(TaskExecutor &executor, ForecastState &state, const ForecastBindData &bind, SeriesForecast &out)
+	    : BaseExecutorTask(executor), state(state), bind(bind), out(out) {
 	}
 
-	//! Runs `job` on the calling thread and on up to `helpers` pool threads, and returns once all have finished.
-	//! `job` must return when there is no work left (several copies run concurrently).
-	void Run(idx_t helpers, const std::function<void()> &job) {
-		helpers = MinValue<idx_t>(helpers, threads.size());
-		std::mutex done_lock;
-		std::condition_variable done;
-		idx_t running = helpers;
-		{
-			std::lock_guard<std::mutex> guard(lock);
-			for (idx_t i = 0; i < helpers; i++) {
-				queue.emplace_back([&]() {
-					job();
-					std::lock_guard<std::mutex> done_guard(done_lock);
-					if (--running == 0) {
-						done.notify_one();
-					}
-				});
-			}
-		}
-		available.notify_all();
-		job();
-		std::unique_lock<std::mutex> done_guard(done_lock);
-		done.wait(done_guard, [&] { return running == 0; });
+	void ExecuteTask() override {
+		ComputeForecast(state, bind, out);
+	}
+
+	string TaskType() const override {
+		return "TimestralForecastTask";
 	}
 
 private:
-	ForecastPool() {
-		auto count = MaxValue<idx_t>(std::thread::hardware_concurrency(), 1);
-		for (idx_t i = 0; i < count; i++) {
-			try {
-				threads.emplace_back([this] { WorkerLoop(); });
-			} catch (std::exception &) {
-				// Out of threads (e.g. a container pids limit): work with what was created; callers always help.
-				break;
-			}
-		}
-		for (auto &thread : threads) {
-			thread.detach();
-		}
-	}
-
-	void WorkerLoop() {
-		while (true) {
-			std::function<void()> task;
-			{
-				std::unique_lock<std::mutex> guard(lock);
-				available.wait(guard, [&] { return !queue.empty(); });
-				task = std::move(queue.front());
-				queue.pop_front();
-			}
-			task();
-		}
-	}
-
-	std::mutex lock;
-	std::condition_variable available;
-	std::deque<std::function<void()>> queue;
-	std::vector<std::thread> threads;
+	ForecastState &state;
+	const ForecastBindData &bind;
+	SeriesForecast &out;
 };
 
-//! Forecasts `states[0..count)` with up to `bind.parallelism` threads, then writes them in order.
+//! Forecasts `states[0..count)` and writes them in order. DuckDB often finalizes all groups of a small hash table
+//! from one thread, so every series is scheduled as a task on DuckDB's own scheduler: they run on its worker
+//! threads (as many as `SET threads`), with this thread helping.
 static void FinalizeStates(ForecastState **states, idx_t count, const ForecastBindData &bind, Vector &result,
                            idx_t offset) {
-	auto threads = MaxValue<idx_t>(MinValue<idx_t>(bind.parallelism, count), 1);
+	auto db = bind.db.lock();
+	if (!db) {
+		throw InternalException("timestral: the database of this forecast is gone");
+	}
+	auto &scheduler = TaskScheduler::GetScheduler(*db);
 	// Bounded chunks keep at most a few forecasts per thread in memory (a horizon can be 100,000 steps).
-	auto chunk_size = threads * 4;
+	auto chunk_size = MaxValue<idx_t>(NumericCast<idx_t>(scheduler.NumberOfThreads()), 1) * 4;
 	std::vector<SeriesForecast> forecasts;
 	for (idx_t chunk_start = 0; chunk_start < count; chunk_start += chunk_size) {
 		auto chunk_count = MinValue<idx_t>(chunk_size, count - chunk_start);
 		forecasts.assign(chunk_count, SeriesForecast());
-		std::atomic<idx_t> next {0};
-		std::atomic<bool> failed {false};
-		std::mutex error_lock;
-		ErrorData error;
-		auto job = [&]() {
-			while (!failed) {
-				auto i = next++;
-				if (i >= chunk_count) {
-					return;
-				}
-				try {
-					ComputeForecast(*states[chunk_start + i], bind, forecasts[i]);
-				} catch (std::exception &ex) {
-					std::lock_guard<std::mutex> guard(error_lock);
-					if (!failed) {
-						error = ErrorData(ex);
-						failed = true;
-					}
-				}
-			}
-		};
-		if (threads == 1 || chunk_count == 1) {
-			job();
-		} else {
-			ForecastPool::Instance().Run(MinValue<idx_t>(threads, chunk_count) - 1, job);
+		TaskExecutor executor(scheduler);
+		for (idx_t i = 0; i < chunk_count; i++) {
+			executor.ScheduleTask(make_uniq<ForecastTask>(executor, *states[chunk_start + i], bind, forecasts[i]));
 		}
-		if (failed) {
-			error.Throw();
-		}
+		executor.WorkOnTasks();
 		for (idx_t i = 0; i < chunk_count; i++) {
 			WriteForecast(forecasts[i], bind, result, offset + chunk_start + i);
 		}
@@ -436,7 +364,7 @@ static unique_ptr<FunctionData> ForecastBind(ClientContext &context, AggregateFu
                                              vector<unique_ptr<Expression>> &arguments) {
 	auto bind = make_uniq<ForecastBindData>();
 	bind->ts_type = arguments[0]->return_type;
-	bind->parallelism = MaxValue<idx_t>(NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads()), 1);
+	bind->db = context.db;
 	auto &horizon_expr = *arguments[2];
 	if (!horizon_expr.IsFoldable()) {
 		throw BinderException("timestral: horizon must be a constant");
@@ -518,7 +446,7 @@ static unique_ptr<FunctionData> ForecastDeserialize(Deserializer &deserializer, 
 	bind->step.interval.days = deserializer.ReadProperty<int32_t>(106, "step_days");
 	bind->step.interval.micros = deserializer.ReadProperty<int64_t>(107, "step_micros");
 	bind->model = deserializer.ReadProperty<string>(108, "model");
-	bind->parallelism = MaxValue<idx_t>(NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads()), 1);
+	bind->db = context.db;
 	bind->predictor = ModelStore::Instance().GetPredictor(context, bind->model);
 	function.return_type = ForecastEntryType(bind->ts_type);
 	return std::move(bind);

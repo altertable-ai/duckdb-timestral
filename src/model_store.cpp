@@ -27,14 +27,6 @@ string GetStringSetting(ClientContext &context, const string &name) {
 	return value.ToString();
 }
 
-static idx_t GetThreadsSetting(ClientContext &context) {
-	Value value;
-	if (!context.TryGetCurrentSetting("timestral_threads", value) || value.IsNull()) {
-		return 1;
-	}
-	return value.GetValue<idx_t>();
-}
-
 ModelStore &ModelStore::Instance() {
 	// Never destroyed: ONNX Runtime sessions must not outlive their Ort::Env, and tearing either down during process
 	// or DLL unload is unsafe, so both live until the process exits.
@@ -207,18 +199,16 @@ string ModelStore::ResolvePath(ClientContext &context, const ModelManifestEntry 
 
 shared_ptr<BlockPredictor> ModelStore::GetPredictor(ClientContext &context, const string &size) {
 	auto &entry = Manifest(NormalizeSize(size));
-	auto threads = GetThreadsSetting(context);
 	// One download/verification at a time per size; other sizes and cached models are not held up by it.
 	lock_guard<mutex> entry_guard(entry_locks[ManifestIndex(entry)]);
 	auto path = ResolvePath(context, entry);
-	auto key = path + "#" + to_string(threads);
 	lock_guard<mutex> guard(lock);
-	auto it = sessions.find(key);
+	auto it = sessions.find(path);
 	if (it != sessions.end()) {
 		return it->second;
 	}
-	auto predictor = make_shared_ptr<OrtBlockPredictor>(path, threads);
-	sessions[key] = predictor;
+	auto predictor = make_shared_ptr<OrtBlockPredictor>(path);
+	sessions[path] = predictor;
 	return predictor;
 }
 
@@ -228,12 +218,6 @@ shared_ptr<BlockPredictor> ModelStore::GetPredictor(ClientContext &context, cons
 static void ValidateModelSetting(ClientContext &context, SetScope scope, Value &parameter) {
 	if (!parameter.IsNull()) {
 		ModelStore::NormalizeSize(parameter.ToString());
-	}
-}
-
-static void ValidateThreadsSetting(ClientContext &context, SetScope scope, Value &parameter) {
-	if (!parameter.IsNull() && parameter.GetValue<int64_t>() < 1) {
-		throw InvalidInputException("timestral: timestral_threads must be at least 1");
 	}
 }
 
@@ -285,8 +269,6 @@ void RegisterModelStore(ExtensionLoader &loader) {
 	config.AddExtensionOption("timestral_model_path",
 	                          "Explicit local .onnx file to use instead of the download cache (no checksum check)",
 	                          LogicalType::VARCHAR, Value(""));
-	config.AddExtensionOption("timestral_threads", "ONNX Runtime threads per forecast (intra-op)", LogicalType::BIGINT,
-	                          Value::BIGINT(1), ValidateThreadsSetting);
 
 	TableFunction models("timestral_models", {}, ModelsFunction, ModelsBind, ModelsInit);
 	loader.RegisterFunction(models);

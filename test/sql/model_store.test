@@ -44,7 +44,8 @@ SELECT current_setting('timestral_model');
 ----
 28M
 
+# parallelism comes from DuckDB's own scheduler (SET threads); there is no separate timestral thread setting
 statement error
-SET timestral_threads = 0;
+SET timestral_threads = 2;
 ----
-Invalid Input Error: timestral: timestral_threads must be at least 1
+<REGEX>:Catalog Error: unrecognized configuration parameter "timestral_threads".*
