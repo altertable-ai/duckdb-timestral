@@ -17,7 +17,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include_directories(src/include)
 
-set(EXTENSION_SOURCES src/timestral_extension.cpp src/model_store.cpp src/ort_predictor.cpp)
+set(EXTENSION_SOURCES
+    src/timestral_extension.cpp
+    src/forecast_aggregate.cpp
+    src/forecaster.cpp
+    src/model_store.cpp
+    src/ort_predictor.cpp
+    src/time_grid.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

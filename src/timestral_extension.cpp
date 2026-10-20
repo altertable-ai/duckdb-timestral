@@ -5,6 +5,7 @@
 #include "duckdb.hpp"
 #include "duckdb/function/scalar_function.hpp"
 
+#include "timestral/forecast_aggregate.hpp"
 #include "timestral/model_store.hpp"
 #include "timestral/ort_predictor.hpp"
 
@@ -27,6 +28,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(version);
 
 	timestral::RegisterModelStore(loader);
+	timestral::RegisterForecastAggregate(loader);
 }
 
 void TimestralExtension::Load(ExtensionLoader &loader) {
