@@ -67,6 +67,8 @@ How the time grid is built:
 - **Step.** The step is the most common gap between consecutive timestamps, unless you pass `freq`. Monthly,
   quarterly and yearly data must pass `freq`, for example `{'freq': INTERVAL '1 month'}`, because calendar
   frequencies are not inferred from day counts.
+  Calendar steps fall on the series' largest day of the month, clamped to each month's length, so month-end
+  data stays on month ends (Jan 31, Feb 28, Mar 31…).
 - **Gaps.** Missing grid points and `NULL` values are missing values, which the model handles.
 - **Forecast start.** The forecast starts one step after the series' last row. If the last rows have `NULL`
   values, they still count as part of the history, so adding `NULL` rows moves the forecast start forward.
