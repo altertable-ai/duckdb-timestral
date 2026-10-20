@@ -9,12 +9,11 @@ namespace timestral {
 
 // One row per (group, step). Column names arrive as strings and are matched exactly with COLUMNS lambdas,
 // so 'store' does not also select 'store_id'. DuckDB allows one COLUMNS per expression, hence the inner rename.
-static const DefaultTableMacro FORECAST_BY_MACRO = {
-    DEFAULT_SCHEMA,
-    "timestral_forecast_by",
-    {"tbl", "group_by", "ts", "value", "horizon", nullptr},
-    {{"options", "NULL"}, {nullptr, nullptr}},
-    R"(
+static const DefaultTableMacro FORECAST_BY_MACRO = {DEFAULT_SCHEMA,
+                                                    "timestral_forecast_by",
+                                                    {"tbl", "group_by", "ts", "value", "horizon", nullptr},
+                                                    {{"options", "NULL"}, {nullptr, nullptr}},
+                                                    R"(
 SELECT COLUMNS(lambda c: c = group_by), unnest(__timestral_forecast, recursive := true)
 FROM (
     SELECT COLUMNS(lambda c: c = group_by), timestral_forecast(__timestral_ts, __timestral_value, horizon, options)

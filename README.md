@@ -1,102 +1,185 @@
-# Quack
+# timestral: zero-shot forecasting in DuckDB
 
-This repository is based on https://github.com/duckdb/extension-template, check it out if you want to build and ship your own DuckDB extension.
+`timestral` runs [Mistral's Timestral](https://mistral.ai/news/timestral/) time-series foundation models inside
+DuckDB. A forecast is a SQL query: there is no training step, no Python and no GPU. The network runs on CPU through
+a statically linked [ONNX Runtime](https://onnxruntime.ai/), and every forecast comes with 21 quantiles.
 
----
+```sql
+LOAD timestral;
 
-This extension, Quack, allow you to ... <extension_goal>.
+SELECT store, ts, forecast, q10, q90
+FROM timestral_forecast_by('sales', 'store', 'ts', 'amount', 24);
+```
 
+| store | ts                  | forecast | q10   | q90   |
+|-------|---------------------|----------|-------|-------|
+| 1     | 2026-01-21 20:00:00 | 10.98    | 10.96 | 11.00 |
+| 1     | 2026-01-21 21:00:00 | 10.96    | 10.94 | 10.99 |
+| …     | …                   | …        | …     | …     |
+
+(`sales` here holds 500 hourly rows per store; the hello-world in `description.yml` builds it.)
+
+> **Model licence.** This extension is MIT licensed, but the Timestral weights it downloads belong to Mistral AI
+> and are released under Mistral's [Modified MIT licence](https://huggingface.co/mistralai/Timestral-5M/blob/main/LICENSE).
+> That licence **grants no rights to a company whose consolidated monthly revenue (or its employer's) exceeds
+> $20 million**, including through derivatives such as the ONNX files this extension uses. If that applies to you,
+> contact Mistral AI (sales@mistral.ai) for a commercial licence before using the models.
+
+## Install
+
+Until it is published as a DuckDB community extension, build it from source (see [Building](#building)) and load
+the resulting `build/release/extension/timestral/timestral.duckdb_extension`:
+
+```sql
+LOAD 'build/release/extension/timestral/timestral.duckdb_extension';
+```
+
+Once published, it will install with `INSTALL timestral FROM community; LOAD timestral;`.
+
+On first use the extension downloads the selected model from `https://assets.altertable.ai/timestral/v1/`,
+checks its SHA-256, and caches it in `~/.duckdb/timestral/v1/`.
+
+## Forecasting
+
+### `timestral_forecast(ts, value, horizon [, options])`
+
+`timestral_forecast` is an aggregate: each group is one series. It returns a list with one entry per future step:
+
+```sql
+SELECT store, unnest(timestral_forecast(ts, amount, 24), recursive := true)
+FROM sales
+GROUP BY store;
+```
+
+| Argument | Type | Meaning |
+|---|---|---|
+| `ts` | `TIMESTAMP`, `TIMESTAMPTZ`, `DATE`, `BIGINT`, `INTEGER` | Time of each observation. Rows do not need to be ordered. |
+| `value` | any numeric | Observed value. `NULL`, `NaN` and `±inf` count as missing. |
+| `horizon` | constant integer, 1 to 100,000 | Number of future steps. |
+| `options` | constant `STRUCT`, optional | `model`: `'5m'`, `'28m'`, `'123m'` or `'209m'`. `freq`: the step, an `INTERVAL` (or an integer for integer `ts`). |
+
+Each entry is `STRUCT(ts, forecast, q01, q05, q10, …, q95, q99)`:
+- `ts` has the input's type.
+- `forecast` is the median (`q50`).
+- `q01` to `q99` are the model's 21 quantiles.
+
+How the time grid is built:
+- **Step.** The step is the most common gap between consecutive timestamps, unless you pass `freq`. Monthly,
+  quarterly and yearly data must pass `freq`, for example `{'freq': INTERVAL '1 month'}`, because calendar
+  frequencies are not inferred from day counts.
+- **Gaps.** Missing grid points and `NULL` values are missing values, which the model handles.
+- **Forecast start.** The forecast starts one step after the series' last row. If the last rows have `NULL`
+  values, they still count as part of the history, so adding `NULL` rows moves the forecast start forward.
+- **Duplicates and off-grid timestamps.** These raise an error. Pre-aggregate with `time_bucket` first.
+- **Empty series.** A series with no observed value, or with a single row and no `freq`, returns `NULL`
+  instead of failing the query.
+- **Long histories.** Only the last 32,768 steps are used (the model's context length).
+
+### `timestral_forecast_by(table, group_by, ts, value, horizon [, options := …])`
+
+`timestral_forecast_by` is a table macro around the aggregate. It returns one row per (group, step), with the
+group column under its own name followed by `ts, forecast, q01 … q99`. Column names are given as strings and
+matched exactly.
+
+```sql
+FROM timestral_forecast_by('sales', 'store', 'ts', 'amount', 12, options := {'freq': INTERVAL '1 month'});
+```
+
+### Choosing a model
+
+| Size | File | GIFT-Eval MASE ↓ | GIFT-Eval CRPS ↓ | 1,000 series, 2,016 steps of context → 96 steps* |
+|---|---|---|---|---|
+| `5m` (default) | 23 MB | 0.705 | 0.479 | 1.9 s |
+| `28m` | 114 MB | 0.678 | 0.461 | 8.5 s |
+| `123m` | 495 MB | 0.659 | 0.448 | 37 s |
+| `209m` | 842 MB | 0.658 | 0.446 | 71 s |
+
+\* Apple M4 Pro, 14 threads. The accuracy figures are Mistral's published GIFT-Eval results.
+
+Use `SET timestral_model = '28m'` to change the default, or pass `{'model': '28m'}` to a single call.
+
+## Settings
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `timestral_model` | `'5m'` | Default model size. |
+| `timestral_model_url` | `'https://assets.altertable.ai/timestral/v1'` | Where model files are downloaded from. |
+| `timestral_cache_dir` | `'~/.duckdb/timestral/v1'` | Where downloaded models are cached. |
+| `timestral_model_path` | `''` | A local `.onnx` file to use instead of the download cache. No checksum check. |
+| `timestral_threads` | `1` | ONNX Runtime threads per forecast. Series are already forecast in parallel (one per DuckDB thread), so raise this only for a few long series on a large model. |
+
+### Offline use
+
+`timestral_models()` lists every model with its URL, SHA-256, size and whether it is cached:
+
+```sql
+SELECT size, cached, local_path FROM timestral_models();
+```
+
+To use the extension on a machine without internet access, do either of these:
+- Copy the `.onnx` file into `local_path`.
+- Point `timestral_model_path` at the file.
+
+## How it works
+
+Mistral's reference implementation is PyTorch. `scripts/export/export_onnx.py` exports each checkpoint's
+single-block forecast to ONNX: normalisation, patching, the transformer and the quantile head. The forecasting
+logic around it is ported to C++ in `src/forecaster.cpp`, following the reference function by function. That logic
+covers block-by-block rollout for long horizons, refined scaling, quantile capping, symmetric averaging and
+non-negative clipping.
+
+The parity tests in `test/sql/parity_*.test` compare all 21 quantiles with Mistral's PyTorch output on 14 cases.
+Those cases include long contexts, horizons beyond 1,024 steps, missing values and very large magnitudes. The
+largest difference is 1.1e-6 of the series scale.
+
+## Limitations
+
+- No covariates (past-only, known-future, categorical) and no joint multivariate forecasting yet. The model
+  supports both, so they are a natural next step.
+- Not available for DuckDB-WASM, Windows MinGW or Linux musl builds, because ONNX Runtime does not support them.
+- `TIMESTAMPTZ` values are treated as UTC instants. Daily data at local midnight shifts by an hour across daylight
+  saving changes and falls off the grid. Cast to `TIMESTAMP` in the local time zone first.
+- The model is loaded, and downloaded if needed, when the query is planned. `EXPLAIN` therefore triggers the
+  download too.
 
 ## Building
-### Managing dependencies
-DuckDB extensions uses VCPKG for dependency management. Enabling VCPKG is very simple: follow the [installation instructions](https://vcpkg.io/en/getting-started) or just run the following:
-```shell
-git clone https://github.com/Microsoft/vcpkg.git
-./vcpkg/bootstrap-vcpkg.sh
-export VCPKG_TOOLCHAIN_PATH=`pwd`/vcpkg/scripts/buildsystems/vcpkg.cmake
-```
-Note: VCPKG is only required for extensions that want to rely on it for dependency management. If you want to develop an extension without dependencies, or want to do your own dependency management, just skip this step. Note that the example extension uses VCPKG to build with a dependency for instructive purposes, so when skipping this step the build may not work without removing the dependency.
 
-### Build steps
-Now to build the extension, run:
-```sh
-make
-```
-The main binaries that will be built are:
-```sh
-./build/release/duckdb
-./build/release/test/unittest
-./build/release/extension/quack/quack.duckdb_extension
-```
-- `duckdb` is the binary for the duckdb shell with the extension code automatically loaded.
-- `unittest` is the test runner of duckdb. Again, the extension is already linked into the binary.
-- `quack.duckdb_extension` is the loadable binary as it would be distributed.
-
-## Running the extension
-To run the extension code, simply start the shell with `./build/release/duckdb`.
-
-Now we can use the features from the extension directly in DuckDB. The template contains a single scalar function `quack()` that takes a string arguments and returns a string:
-```
-D select quack('Jane') as result;
-┌───────────────┐
-│    result     │
-│    varchar    │
-├───────────────┤
-│ Quack Jane 🐥 │
-└───────────────┘
+```bash
+git clone --recurse-submodules https://github.com/altertable-ai/duckdb-timestral
+cd duckdb-timestral
+git clone https://github.com/microsoft/vcpkg.git ../vcpkg && ../vcpkg/bootstrap-vcpkg.sh
+export VCPKG_TOOLCHAIN_PATH=$PWD/../vcpkg/scripts/buildsystems/vcpkg.cmake
+GEN=ninja make release
 ```
 
-## Running the tests
-Different tests can be created for DuckDB extensions. The primary way of testing DuckDB extensions should be the SQL tests in `./test/sql`. These SQL tests can be run using:
-```sh
+The first build compiles ONNX Runtime from source through vcpkg, which takes a while. The patched ports in
+`vcpkg_ports/` are explained in [`vcpkg_ports/README.md`](vcpkg_ports/README.md). The loadable extension is about
+34 MB (macOS arm64).
+
+Run the tests:
+
+```bash
 make test
 ```
 
-### Installing the deployed binaries
-To install your extension binaries from S3, you will need to do two things. Firstly, DuckDB should be launched with the
-`allow_unsigned_extensions` option set to true. How to set this will depend on the client you're using. Some examples:
+Tests that need a model are skipped unless you point them at one. Export it with `scripts/export` (see its
+[README](scripts/export/README.md)) or download it from the asset URL:
 
-CLI:
-```shell
-duckdb -unsigned
+```bash
+TIMESTRAL_MODEL_PATH=$PWD/scripts/export/out/timestral-5m.onnx make test
 ```
 
-Python:
-```python
-con = duckdb.connect(':memory:', config={'allow_unsigned_extensions' : 'true'})
+```bash
+TIMESTRAL_MODEL_DIR=$PWD/scripts/export/out make test
 ```
 
-NodeJS:
-```js
-db = new duckdb.Database(':memory:', {"allow_unsigned_extensions": "true"});
-```
+The second command also runs the parity tests for the 28M, 123M and 209M models.
 
-Secondly, you will need to set the repository endpoint in DuckDB to the HTTP url of your bucket + version of the extension
-you want to install. To do this run the following SQL query in DuckDB:
-```sql
-SET custom_extension_repository='bucket.s3.eu-west-1.amazonaws.com/<your_extension_name>/latest';
-```
-Note that the `/latest` path will allow you to install the latest extension version available for your current version of
-DuckDB. To specify a specific version, you can pass the version instead.
+## Licences
 
-After running these steps, you can install and load your extension using the regular INSTALL/LOAD commands in DuckDB:
-```sql
-INSTALL quack;
-LOAD quack;
-```
-
-## Setting up CLion
-
-### Opening project
-Configuring CLion with this extension requires a little work. Firstly, make sure that the DuckDB submodule is available.
-Then make sure to open `./duckdb/CMakeLists.txt` (so not the top level `CMakeLists.txt` file from this repo) as a project in CLion.
-Now to fix your project path go to `tools->CMake->Change Project Root`([docs](https://www.jetbrains.com/help/clion/change-project-root-directory.html)) to set the project root to the root dir of this repo.
-
-### Debugging
-To set up debugging in CLion, there are two simple steps required. Firstly, in `CLion -> Settings / Preferences -> Build, Execution, Deploy -> CMake` you will need to add the desired builds (e.g. Debug, Release, RelDebug, etc). There's different ways to configure this, but the easiest is to leave all empty, except the `build path`, which needs to be set to `../build/{build type}`, and CMake Options to which the following flag should be added, with the path to the extension CMakeList:
-
-```
--DDUCKDB_EXTENSION_CONFIGS=<path_to_the_exentension_CMakeLists.txt>
-```
-
-The second step is to configure the unittest runner as a run/debug configuration. To do this, go to `Run -> Edit Configurations` and click `+ -> Cmake Application`. The target and executable should be `unittest`. This will run all the DuckDB tests. To specify only running the extension specific tests, add `--test-dir ../../.. [sql]` to the `Program Arguments`. Note that it is recommended to use the `unittest` executable for testing/development within CLion. The actual DuckDB CLI currently does not reliably work as a run target in CLion.
+- This extension: MIT (see `LICENSE`).
+- Timestral weights and the ONNX files derived from them: Mistral AI, Modified MIT, with the revenue restriction
+  above.
+- Timestral reference code: Apache 2.0.
+- ONNX Runtime: MIT.
+- vcpkg overlay ports adapted from [anofox_tabfm](https://github.com/DataZooDE/anofox-tabfm): MIT.

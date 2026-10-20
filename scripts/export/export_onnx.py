@@ -133,8 +133,9 @@ def sha256_of(path: Path) -> str:
 
 
 def write_header(entries: list[dict]) -> None:
+    # Laid out exactly as clang-format (DuckDB's .clang-format) formats it, so `make format-check` passes.
     rows = "\n".join(
-        f'    {{"{e["size"]}", "{e["file_name"]}", "{e["sha256"]}", {e["file_bytes"]}ULL, "{e["hf_revision"]}"}},'
+        f'    {{"{e["size"]}", "{e["file_name"]}", "{e["sha256"]}", {e["file_bytes"]}ULL,\n     "{e["hf_revision"]}"}},'
         for e in entries
     )
     HEADER_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -157,7 +158,7 @@ struct ModelManifestEntry {{
 static constexpr const char *ASSET_VERSION = "{ASSET_VERSION}";
 
 static constexpr ModelManifestEntry MODEL_MANIFEST[] = {{
-{rows.replace("    ", chr(9))}
+{rows}
 }};
 
 }} // namespace timestral

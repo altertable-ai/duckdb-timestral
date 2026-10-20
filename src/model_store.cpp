@@ -266,8 +266,8 @@ void RegisterModelStore(ExtensionLoader &loader) {
 	config.AddExtensionOption("timestral_model_path",
 	                          "Explicit local .onnx file to use instead of the download cache (no checksum check)",
 	                          LogicalType::VARCHAR, Value(""));
-	config.AddExtensionOption("timestral_threads", "ONNX Runtime threads per forecast (intra-op)",
-	                          LogicalType::BIGINT, Value::BIGINT(1), ValidateThreadsSetting);
+	config.AddExtensionOption("timestral_threads", "ONNX Runtime threads per forecast (intra-op)", LogicalType::BIGINT,
+	                          Value::BIGINT(1), ValidateThreadsSetting);
 
 	TableFunction models("timestral_models", {}, ModelsFunction, ModelsBind, ModelsInit);
 	loader.RegisterFunction(models);

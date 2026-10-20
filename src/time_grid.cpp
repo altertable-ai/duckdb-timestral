@@ -76,8 +76,9 @@ GridSeries BuildGrid(std::vector<std::pair<int64_t, double>> &rows, const GridOp
 	if (rows.empty()) {
 		return grid;
 	}
-	std::sort(rows.begin(), rows.end(),
-	          [](const std::pair<int64_t, double> &a, const std::pair<int64_t, double> &b) { return a.first < b.first; });
+	std::sort(rows.begin(), rows.end(), [](const std::pair<int64_t, double> &a, const std::pair<int64_t, double> &b) {
+		return a.first < b.first;
+	});
 	for (idx_t i = 1; i < rows.size(); i++) {
 		if (rows[i].first == rows[i - 1].first) {
 			throw InvalidInputException(
@@ -101,8 +102,8 @@ GridSeries BuildGrid(std::vector<std::pair<int64_t, double>> &rows, const GridOp
 	if (!StepIndex(grid.last_point, rows.front().first, grid.step, span)) {
 		span = -1; // reported by the loop below
 	}
-	idx_t window = static_cast<idx_t>(std::max<int64_t>(
-	    1, std::min<int64_t>(span + 1, static_cast<int64_t>(options.context_length))));
+	idx_t window = static_cast<idx_t>(
+	    std::max<int64_t>(1, std::min<int64_t>(span + 1, static_cast<int64_t>(options.context_length))));
 	grid.context.values.assign(window, std::nanf(""));
 	bool any_observed = false;
 	bool all_nonnegative = true;
@@ -110,8 +111,7 @@ GridSeries BuildGrid(std::vector<std::pair<int64_t, double>> &rows, const GridOp
 		int64_t k;
 		if (!StepIndex(grid.last_point, row.first, grid.step, k)) {
 			throw InvalidInputException("timestral: timestamp %s is not on the series grid (step %s); %s",
-			                            options.format_ts(row.first), StepToString(grid.step),
-			                            options.off_grid_hint);
+			                            options.format_ts(row.first), StepToString(grid.step), options.off_grid_hint);
 		}
 		// Values become float32 for the model, as in the reference; NaN and +/-inf are missing.
 		auto value = static_cast<float>(row.second);
