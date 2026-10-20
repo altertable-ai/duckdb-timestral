@@ -305,6 +305,10 @@ static unique_ptr<FunctionData> ForecastBind(ClientContext &context, AggregateFu
 	bind->horizon = static_cast<idx_t>(horizon_value);
 
 	auto model = GetStringSetting(context, "timestral_model");
+	if (arguments.size() > 3 && arguments[3]->return_type.id() == LogicalTypeId::SQLNULL) {
+		// NULL options (the default of timestral_forecast_by) mean no options.
+		Function::EraseArgument(function, arguments, 3);
+	}
 	if (arguments.size() > 3) {
 		auto &options_expr = *arguments[3];
 		if (!options_expr.IsFoldable() || options_expr.return_type.id() != LogicalTypeId::STRUCT) {

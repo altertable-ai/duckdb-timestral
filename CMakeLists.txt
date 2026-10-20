@@ -20,6 +20,7 @@ include_directories(src/include)
 set(EXTENSION_SOURCES
     src/timestral_extension.cpp
     src/forecast_aggregate.cpp
+    src/forecast_macro.cpp
     src/forecaster.cpp
     src/model_store.cpp
     src/ort_predictor.cpp

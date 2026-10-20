@@ -29,6 +29,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	timestral::RegisterModelStore(loader);
 	timestral::RegisterForecastAggregate(loader);
+	timestral::RegisterForecastMacro(loader);
 }
 
 void TimestralExtension::Load(ExtensionLoader &loader) {
