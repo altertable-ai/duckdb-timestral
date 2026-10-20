@@ -1,0 +1,33 @@
+# name: test/sql/model_store_download.test
+# description: downloading a model through timestral_model_url verifies it and leaves no partial file
+# group: [sql]
+
+require timestral
+
+require-env TIMESTRAL_MODEL_DIR
+
+statement ok
+SET timestral_model_url = '${TIMESTRAL_MODEL_DIR}';
+
+statement ok
+SET timestral_cache_dir = '__TEST_DIR__/download_cache';
+
+query I
+SELECT cached FROM timestral_models() WHERE size = '5m';
+----
+false
+
+query I
+SELECT len(timestral_forecast(i, sin(i)::DOUBLE, 3)) FROM range(64) r(i);
+----
+3
+
+query I
+SELECT cached FROM timestral_models() WHERE size = '5m';
+----
+true
+
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/download_cache/*.tmp*');
+----
+0

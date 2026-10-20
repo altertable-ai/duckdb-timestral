@@ -14,9 +14,10 @@ namespace duckdb {
 namespace timestral {
 
 static Ort::Env &SharedEnv() {
-	// One environment per process; it owns ONNX Runtime's logging and global thread state.
-	static Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "timestral");
-	return env;
+	// One environment per process; it owns ONNX Runtime's logging and global thread state. Never destroyed, so it
+	// outlives every session (sessions live in the never-destroyed ModelStore).
+	static auto *env = new Ort::Env(ORT_LOGGING_LEVEL_WARNING, "timestral");
+	return *env;
 }
 
 struct OrtBlockPredictor::Impl {

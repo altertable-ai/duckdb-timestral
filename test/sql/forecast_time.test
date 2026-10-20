@@ -122,3 +122,29 @@ query I
 SELECT typeof(timestral_forecast(ts, v, 1)[1].ts) FROM (SELECT ((TIMESTAMP '2026-01-01' + INTERVAL (i) HOUR)::VARCHAR || '+00')::TIMESTAMPTZ AS ts, i::DOUBLE AS v FROM range(50) r(i));
 ----
 TIMESTAMP WITH TIME ZONE
+
+# month-end series stay on month ends whatever the length of the last month
+query I
+SELECT list(ts) FROM (SELECT unnest(timestral_forecast(d, v, 3, {'freq': INTERVAL '1 month'}), recursive := true)
+  FROM (SELECT last_day(DATE '2025-01-01' + INTERVAL (i) MONTH) AS d, i::DOUBLE AS v FROM range(11) r(i)));
+----
+[2025-12-31, 2026-01-31, 2026-02-28]
+
+query I
+SELECT list(ts) FROM (SELECT unnest(timestral_forecast(d, v, 2, {'freq': INTERVAL '1 month'}), recursive := true)
+  FROM (SELECT last_day(DATE '2024-03-01' + INTERVAL (i) MONTH) AS d, i::DOUBLE AS v FROM range(12) r(i)));
+----
+[2025-03-31, 2025-04-30]
+
+# quarterly month-end data ending in a 30-day month
+query I
+SELECT list(ts) FROM (SELECT unnest(timestral_forecast(d, v, 2, {'freq': INTERVAL '3 months'}), recursive := true)
+  FROM (SELECT last_day(DATE '2023-03-01' + INTERVAL (3 * i) MONTH) AS d, i::DOUBLE AS v FROM range(11) r(i)));
+----
+[2025-12-31, 2026-03-31]
+
+# with an explicit freq the off-grid error does not tell the user to pass a freq
+statement error
+SELECT timestral_forecast(d, v, 3, {'freq': INTERVAL '1 month'}) FROM (SELECT * FROM monthly UNION ALL SELECT DATE '2026-01-15', 1);
+----
+<REGEX>:.*is not on the series grid \(step 1 month\); use time_bucket to align the timestamps.*

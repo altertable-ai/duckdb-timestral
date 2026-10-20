@@ -47,10 +47,37 @@ static GridStep InferStep(const std::vector<std::pair<int64_t, double>> &rows, b
 	return step;
 }
 
-static int64_t MonthIndex(int64_t micros) {
+static int64_t MonthIndex(int64_t micros, int32_t *day_out = nullptr) {
 	int32_t year, month, day;
 	Date::Convert(Timestamp::GetDate(timestamp_t(micros)), year, month, day);
+	if (day_out) {
+		*day_out = day;
+	}
 	return int64_t(year) * 12 + month - 1;
+}
+
+static int64_t TimeOfDay(int64_t micros) {
+	date_t date;
+	dtime_t time;
+	Timestamp::Convert(timestamp_t(micros), date, time);
+	return time.micros;
+}
+
+//! Day `min(anchor_day, days in month)` of the month `month_index`, at `time_of_day`.
+static int64_t MonthPoint(int64_t month_index, int32_t anchor_day, int64_t time_of_day) {
+	auto year = month_index >= 0 ? month_index / 12 : -((-month_index + 11) / 12);
+	auto month = static_cast<int32_t>(month_index - year * 12) + 1;
+	if (year > NumericLimits<int32_t>::Maximum() || year < NumericLimits<int32_t>::Minimum()) {
+		throw OutOfRangeException("timestral: forecast timestamps are out of range");
+	}
+	auto y = static_cast<int32_t>(year);
+	auto day = MinValue<int32_t>(anchor_day, Date::MonthDays(y, month));
+	date_t date;
+	timestamp_t result;
+	if (!Date::TryFromDate(y, month, day, date) || !Timestamp::TryFromDatetime(date, dtime_t(time_of_day), result)) {
+		throw OutOfRangeException("timestral: forecast timestamps are out of range");
+	}
+	return result.value;
 }
 
 //! Number of steps from `ts` up to `last`, or false when `ts` is not on the grid.
@@ -63,12 +90,13 @@ static bool StepIndex(int64_t last, int64_t ts, const GridStep &step, int64_t &k
 		k = distance / step.width;
 		return true;
 	}
-	auto months = MonthIndex(last) - MonthIndex(ts);
+	auto ts_month = MonthIndex(ts);
+	auto months = MonthIndex(last) - ts_month;
 	if (months % step.interval.months != 0) {
 		return false;
 	}
 	k = months / step.interval.months;
-	return GridPoint(last, step, -k) == ts;
+	return MonthPoint(ts_month, step.anchor_day, TimeOfDay(last)) == ts;
 }
 
 GridSeries BuildGrid(std::vector<std::pair<int64_t, double>> &rows, const GridOptions &options) {
@@ -96,6 +124,15 @@ GridSeries BuildGrid(std::vector<std::pair<int64_t, double>> &rows, const GridOp
 	if (!grid.step.IsCalendar() && grid.step.width <= 0) {
 		throw InvalidInputException("timestral: freq must be positive");
 	}
+	if (grid.step.IsCalendar()) {
+		grid.step.anchor_day = 1;
+		for (auto &row : rows) {
+			int32_t day;
+			MonthIndex(row.first, &day);
+			grid.step.anchor_day = MaxValue(grid.step.anchor_day, day);
+		}
+	}
+	auto &hint = options.explicit_step ? options.explicit_step_hint : options.off_grid_hint;
 
 	grid.last_point = rows.back().first;
 	int64_t span;
@@ -111,7 +148,7 @@ GridSeries BuildGrid(std::vector<std::pair<int64_t, double>> &rows, const GridOp
 		int64_t k;
 		if (!StepIndex(grid.last_point, row.first, grid.step, k)) {
 			throw InvalidInputException("timestral: timestamp %s is not on the series grid (step %s); %s",
-			                            options.format_ts(row.first), StepToString(grid.step), options.off_grid_hint);
+			                            options.format_ts(row.first), StepToString(grid.step), hint);
 		}
 		// Values become float32 for the model, as in the reference; NaN and +/-inf are missing.
 		auto value = static_cast<float>(row.second);
@@ -130,13 +167,12 @@ GridSeries BuildGrid(std::vector<std::pair<int64_t, double>> &rows, const GridOp
 
 int64_t GridPoint(int64_t last_point, const GridStep &step, int64_t k) {
 	if (step.IsCalendar()) {
-		int64_t months;
+		int64_t months, month_index;
 		if (!TryMultiplyOperator::Operation(int64_t(step.interval.months), k, months) ||
-		    months > NumericLimits<int32_t>::Maximum() || months < NumericLimits<int32_t>::Minimum()) {
+		    !TryAddOperator::Operation(MonthIndex(last_point), months, month_index)) {
 			throw OutOfRangeException("timestral: forecast timestamps are out of range");
 		}
-		interval_t shift {static_cast<int32_t>(months), 0, 0};
-		return Interval::Add(timestamp_t(last_point), shift).value;
+		return MonthPoint(month_index, step.anchor_day, TimeOfDay(last_point));
 	}
 	int64_t offset, result;
 	if (!TryMultiplyOperator::Operation(step.width, k, offset) ||

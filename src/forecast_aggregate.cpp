@@ -16,6 +16,8 @@
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
+#include <deque>
+#include <functional>
 #include <mutex>
 #include <thread>
 
@@ -70,7 +72,7 @@ struct ForecastBindData : public FunctionData {
 		auto &other = other_p.Cast<ForecastBindData>();
 		return horizon == other.horizon && ts_type == other.ts_type && has_step == other.has_step &&
 		       step.is_interval == other.step.is_interval && step.width == other.step.width &&
-		       step.interval == other.step.interval && predictor == other.predictor;
+		       step.interval == other.step.interval && parallelism == other.parallelism && predictor == other.predictor;
 	}
 };
 
@@ -130,12 +132,13 @@ static Value TimestampValue(const LogicalType &type, int64_t ts) {
 	}
 }
 
-static string OffGridHint(const LogicalType &type) {
+static string OffGridHint(const LogicalType &type, bool explicit_step) {
 	if (!IsTemporal(type)) {
-		return "pass freq or use time_bucket";
+		return explicit_step ? "use time_bucket to align the timestamps" : "pass freq or use time_bucket";
 	}
-	string hint = "pass an explicit freq, e.g. {'freq': INTERVAL '1 month'} (calendar frequencies are not "
-	              "inferred), or use time_bucket";
+	string hint = explicit_step ? "use time_bucket to align the timestamps"
+	                            : "pass an explicit freq, e.g. {'freq': INTERVAL '1 month'} (calendar frequencies are "
+	                              "not inferred), or use time_bucket";
 	if (type.id() == LogicalTypeId::TIMESTAMP_TZ) {
 		hint += ". TIMESTAMPTZ values are UTC instants, so local-time data shifts across daylight saving changes: "
 		        "cast to TIMESTAMP in the local time zone first, or use time_bucket";
@@ -214,7 +217,8 @@ static void ComputeForecast(ForecastState &state, const ForecastBindData &bind, 
 	options.format_ts = [&](int64_t ts) {
 		return TimestampValue(bind.ts_type, ts).ToString();
 	};
-	options.off_grid_hint = OffGridHint(bind.ts_type);
+	options.off_grid_hint = OffGridHint(bind.ts_type, false);
+	options.explicit_step_hint = OffGridHint(bind.ts_type, true);
 	out.grid = BuildGrid(*state.rows, options);
 	out.ok = out.grid.ok &&
 	         ForecastSeries(*bind.predictor, config, out.grid.context, bind.horizon, ForecastOptions(), out.quantiles);
@@ -223,7 +227,11 @@ static void ComputeForecast(ForecastState &state, const ForecastBindData &bind, 
 static void WriteForecast(const SeriesForecast &forecast, const ForecastBindData &bind, Vector &result,
                           idx_t result_idx) {
 	if (!forecast.ok) {
-		FlatVector::SetNull(result, result_idx, true);
+		if (result.GetVectorType() == VectorType::CONSTANT_VECTOR) {
+			ConstantVector::SetNull(result, true);
+		} else {
+			FlatVector::SetNull(result, result_idx, true);
+		}
 		return;
 	}
 	const auto &config = DefaultModelConfig();
@@ -244,82 +252,114 @@ static void WriteForecast(const SeriesForecast &forecast, const ForecastBindData
 	FlatVector::GetData<list_entry_t>(result)[result_idx] = list_entry_t(offset, bind.horizon);
 }
 
-//! Caps the number of series forecast at the same time across all queries of the process, so parallel
-//! finalize calls (DuckDB may run several) never oversubscribe the CPU.
-class ForecastSlots {
+//! A process-wide pool of forecasting threads. DuckDB often finalizes all groups of a small hash table from a
+//! single thread, so the series of one finalize call are spread over this pool. Its size (the core count) bounds
+//! the threads created whatever the number of concurrent finalize calls. It is never destroyed: joining threads
+//! during process or DLL teardown can hang.
+class ForecastPool {
 public:
-	static ForecastSlots &Instance() {
-		static ForecastSlots slots(MaxValue<idx_t>(std::thread::hardware_concurrency(), 1));
-		return slots;
+	static ForecastPool &Instance() {
+		static auto *pool = new ForecastPool();
+		return *pool;
 	}
-	void Acquire() {
-		std::unique_lock<std::mutex> guard(lock);
-		available.wait(guard, [&] { return free_slots > 0; });
-		free_slots--;
-	}
-	void Release() {
+
+	//! Runs `job` on the calling thread and on up to `helpers` pool threads, and returns once all have finished.
+	//! `job` must return when there is no work left (several copies run concurrently).
+	void Run(idx_t helpers, const std::function<void()> &job) {
+		helpers = MinValue<idx_t>(helpers, threads.size());
+		std::mutex done_lock;
+		std::condition_variable done;
+		idx_t running = helpers;
 		{
 			std::lock_guard<std::mutex> guard(lock);
-			free_slots++;
+			for (idx_t i = 0; i < helpers; i++) {
+				queue.emplace_back([&]() {
+					job();
+					std::lock_guard<std::mutex> done_guard(done_lock);
+					if (--running == 0) {
+						done.notify_one();
+					}
+				});
+			}
 		}
-		available.notify_one();
+		available.notify_all();
+		job();
+		std::unique_lock<std::mutex> done_guard(done_lock);
+		done.wait(done_guard, [&] { return running == 0; });
 	}
 
 private:
-	explicit ForecastSlots(idx_t slots) : free_slots(slots) {
+	ForecastPool() {
+		auto count = MaxValue<idx_t>(std::thread::hardware_concurrency(), 1);
+		for (idx_t i = 0; i < count; i++) {
+			try {
+				threads.emplace_back([this] { WorkerLoop(); });
+			} catch (std::exception &) {
+				// Out of threads (e.g. a container pids limit): work with what was created; callers always help.
+				break;
+			}
+		}
+		for (auto &thread : threads) {
+			thread.detach();
+		}
 	}
+
+	void WorkerLoop() {
+		while (true) {
+			std::function<void()> task;
+			{
+				std::unique_lock<std::mutex> guard(lock);
+				available.wait(guard, [&] { return !queue.empty(); });
+				task = std::move(queue.front());
+				queue.pop_front();
+			}
+			task();
+		}
+	}
+
 	std::mutex lock;
 	std::condition_variable available;
-	idx_t free_slots;
+	std::deque<std::function<void()>> queue;
+	std::vector<std::thread> threads;
 };
 
-//! Forecasts `states[0..count)` using up to `bind.parallelism` threads, then writes them in order. DuckDB often
-//! finalizes all groups of a small hash table from a single thread, so the forecasts are parallelized here.
+//! Forecasts `states[0..count)` with up to `bind.parallelism` threads, then writes them in order.
 static void FinalizeStates(ForecastState **states, idx_t count, const ForecastBindData &bind, Vector &result,
                            idx_t offset) {
-	auto threads = MinValue<idx_t>(bind.parallelism, count);
+	auto threads = MaxValue<idx_t>(MinValue<idx_t>(bind.parallelism, count), 1);
 	// Bounded chunks keep at most a few forecasts per thread in memory (a horizon can be 100,000 steps).
-	auto chunk_size = MaxValue<idx_t>(threads * 4, 1);
+	auto chunk_size = threads * 4;
 	std::vector<SeriesForecast> forecasts;
 	for (idx_t chunk_start = 0; chunk_start < count; chunk_start += chunk_size) {
 		auto chunk_count = MinValue<idx_t>(chunk_size, count - chunk_start);
 		forecasts.assign(chunk_count, SeriesForecast());
 		std::atomic<idx_t> next {0};
+		std::atomic<bool> failed {false};
 		std::mutex error_lock;
 		ErrorData error;
-		auto work = [&]() {
-			while (true) {
+		auto job = [&]() {
+			while (!failed) {
 				auto i = next++;
 				if (i >= chunk_count) {
 					return;
 				}
-				{
-					std::lock_guard<std::mutex> guard(error_lock);
-					if (error.HasError()) {
-						return;
-					}
-				}
-				ForecastSlots::Instance().Acquire();
 				try {
 					ComputeForecast(*states[chunk_start + i], bind, forecasts[i]);
 				} catch (std::exception &ex) {
 					std::lock_guard<std::mutex> guard(error_lock);
-					if (!error.HasError()) {
+					if (!failed) {
 						error = ErrorData(ex);
+						failed = true;
 					}
 				}
-				ForecastSlots::Instance().Release();
 			}
 		};
-		std::vector<std::thread> workers;
-		for (idx_t t = 1; t < MinValue<idx_t>(threads, chunk_count); t++) {
-			workers.emplace_back(work);
+		if (threads == 1 || chunk_count == 1) {
+			job();
+		} else {
+			ForecastPool::Instance().Run(MinValue<idx_t>(threads, chunk_count) - 1, job);
 		}
-		work();
-		for (auto &worker : workers) {
-			worker.join();
-		}
-		if (error.HasError()) {
+		if (failed) {
 			error.Throw();
 		}
 		for (idx_t i = 0; i < chunk_count; i++) {

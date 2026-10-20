@@ -37,6 +37,9 @@ private:
 	void VerifyCachedFile(FileSystem &fs, const string &path, const ModelManifestEntry &entry);
 	void Download(ClientContext &context, const ModelManifestEntry &entry, const string &target);
 
+	//! Serialises resolving (and downloading) each model size.
+	mutex entry_locks[4];
+	//! Protects `verified_paths` and `sessions`.
 	mutex lock;
 	//! Paths whose checksum was verified in this process.
 	unordered_set<string> verified_paths;

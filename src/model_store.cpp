@@ -10,6 +10,8 @@
 #include "duckdb/main/extension_helper.hpp"
 #include "mbedtls_wrapper.hpp"
 
+#include <random>
+
 namespace duckdb {
 namespace timestral {
 
@@ -34,8 +36,16 @@ static idx_t GetThreadsSetting(ClientContext &context) {
 }
 
 ModelStore &ModelStore::Instance() {
-	static ModelStore store;
-	return store;
+	// Never destroyed: ONNX Runtime sessions must not outlive their Ort::Env, and tearing either down during process
+	// or DLL unload is unsafe, so both live until the process exits.
+	static auto *store = new ModelStore();
+	return *store;
+}
+
+static_assert(sizeof(MODEL_MANIFEST) / sizeof(MODEL_MANIFEST[0]) <= 4, "ModelStore::entry_locks is too small");
+
+static idx_t ManifestIndex(const ModelManifestEntry &entry) {
+	return static_cast<idx_t>(&entry - MODEL_MANIFEST);
 }
 
 string ModelStore::NormalizeSize(const string &size) {
@@ -102,8 +112,11 @@ static string Sha256Hex(duckdb_mbedtls::MbedTlsWrapper::SHA256State &state) {
 }
 
 void ModelStore::VerifyCachedFile(FileSystem &fs, const string &path, const ModelManifestEntry &entry) {
-	if (verified_paths.count(path)) {
-		return;
+	{
+		lock_guard<mutex> guard(lock);
+		if (verified_paths.count(path)) {
+			return;
+		}
 	}
 	duckdb_mbedtls::MbedTlsWrapper::SHA256State sha;
 	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
@@ -123,6 +136,7 @@ void ModelStore::VerifyCachedFile(FileSystem &fs, const string &path, const Mode
 		                  "removed, run the query again to download it",
 		                  entry.file_name, entry.sha256, actual, path);
 	}
+	lock_guard<mutex> guard(lock);
 	verified_paths.insert(path);
 }
 
@@ -133,7 +147,10 @@ void ModelStore::Download(ClientContext &context, const ModelManifestEntry &entr
 		ExtensionHelper::TryAutoLoadExtension(context, "httpfs");
 	}
 	fs.CreateDirectoriesRecursive(CacheDir(context));
-	auto tmp = target + ".tmp";
+	// A name unique to this download, so concurrent downloads (other processes, other databases) never write to
+	// the same file; the final rename is atomic.
+	std::random_device random;
+	auto tmp = StringUtil::Format("%s.tmp.%08x%08x", target, random(), random());
 	duckdb_mbedtls::MbedTlsWrapper::SHA256State sha;
 	try {
 		auto source = fs.OpenFile(url, FileFlags::FILE_FLAGS_READ);
@@ -164,8 +181,8 @@ void ModelStore::Download(ClientContext &context, const ModelManifestEntry &entr
 		throw IOException("timestral: checksum mismatch for %s (expected %s, got %s) after downloading %s",
 		                  entry.file_name, entry.sha256, actual, url);
 	}
-	fs.TryRemoveFile(target);
 	fs.MoveFile(tmp, target);
+	lock_guard<mutex> guard(lock);
 	verified_paths.insert(target);
 }
 
@@ -191,9 +208,11 @@ string ModelStore::ResolvePath(ClientContext &context, const ModelManifestEntry 
 shared_ptr<BlockPredictor> ModelStore::GetPredictor(ClientContext &context, const string &size) {
 	auto &entry = Manifest(NormalizeSize(size));
 	auto threads = GetThreadsSetting(context);
-	lock_guard<mutex> guard(lock);
+	// One download/verification at a time per size; other sizes and cached models are not held up by it.
+	lock_guard<mutex> entry_guard(entry_locks[ManifestIndex(entry)]);
 	auto path = ResolvePath(context, entry);
 	auto key = path + "#" + to_string(threads);
+	lock_guard<mutex> guard(lock);
 	auto it = sessions.find(key);
 	if (it != sessions.end()) {
 		return it->second;
