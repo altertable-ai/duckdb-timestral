@@ -1,47 +1,35 @@
 #define DUCKDB_EXTENSION_MAIN
 
 #include "timestral_extension.hpp"
-#include "duckdb.hpp"
-#include "duckdb/common/exception.hpp"
-#include "duckdb/function/scalar_function.hpp"
-#include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 
-// OpenSSL linked through vcpkg
-#include <openssl/opensslv.h>
+#include "duckdb.hpp"
+#include "duckdb/function/scalar_function.hpp"
+
+#include <onnxruntime_c_api.h>
 
 namespace duckdb {
 
-inline void TimestralScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &name_vector = args.data[0];
-	UnaryExecutor::Execute<string_t, string_t>(name_vector, result, args.size(), [&](string_t name) {
-		return StringVector::AddString(result, "...........🦆 " + name.GetString());
-	});
-}
-
-inline void TimestralOpenSSLVersionScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &name_vector = args.data[0];
-	UnaryExecutor::Execute<string_t, string_t>(name_vector, result, args.size(), [&](string_t name) {
-		return StringVector::AddString(result, "Timestral " + name.GetString() + ", my linked OpenSSL version is " +
-		                                           OPENSSL_VERSION_TEXT);
-	});
+static void TimestralVersionFun(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &children = StructVector::GetEntries(result);
+	TimestralExtension extension;
+	auto extension_version = extension.Version();
+	children[0]->SetValue(0, Value(extension_version.empty() ? "dev" : extension_version));
+	children[1]->SetValue(0, Value(OrtGetApiBase()->GetVersionString()));
+	result.SetVectorType(VectorType::CONSTANT_VECTOR);
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
-	// Register a scalar function
-	auto timestral_scalar_function =
-	    ScalarFunction("timestral", {LogicalType::VARCHAR}, LogicalType::VARCHAR, TimestralScalarFun);
-
-	loader.RegisterFunction(timestral_scalar_function);
-
-	// Register another scalar function
-	auto timestral_openssl_version_scalar_function = ScalarFunction("timestral_openssl_version", {LogicalType::VARCHAR},
-	                                                             LogicalType::VARCHAR, TimestralOpenSSLVersionScalarFun);
-	loader.RegisterFunction(timestral_openssl_version_scalar_function);
+	auto version_type =
+	    LogicalType::STRUCT({{"extension", LogicalType::VARCHAR}, {"onnxruntime", LogicalType::VARCHAR}});
+	ScalarFunction version("timestral_version", {}, version_type, TimestralVersionFun);
+	version.SetStability(FunctionStability::CONSISTENT);
+	loader.RegisterFunction(version);
 }
 
 void TimestralExtension::Load(ExtensionLoader &loader) {
 	LoadInternal(loader);
 }
+
 std::string TimestralExtension::Name() {
 	return "timestral";
 }

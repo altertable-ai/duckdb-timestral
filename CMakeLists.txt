@@ -1,12 +1,11 @@
 cmake_minimum_required(VERSION 3.5)
 
-# Set extension name here
 set(TARGET_NAME timestral)
 
-# DuckDB's extension distribution supports vcpkg. As such, dependencies can be added in ./vcpkg.json and then
-# used in cmake with find_package. Feel free to remove or replace with other dependencies.
-# Note that it should also be removed from vcpkg.json to prevent needlessly installing it..
-find_package(OpenSSL REQUIRED)
+# ONNX Runtime (CPU execution provider) from vcpkg, linked statically. See vcpkg_ports/README.md.
+find_package(onnxruntime CONFIG REQUIRED)
+# vcpkg installs the public headers under include/onnxruntime/; sources include them flat.
+find_path(TIMESTRAL_ORT_INCLUDE_DIR NAMES onnxruntime_cxx_api.h PATH_SUFFIXES onnxruntime REQUIRED)
 
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
@@ -23,9 +22,10 @@ set(EXTENSION_SOURCES src/timestral_extension.cpp)
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
-# Link OpenSSL in both the static library as the loadable extension
-target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto)
-target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto)
+foreach(_target ${EXTENSION_NAME} ${LOADABLE_EXTENSION_NAME})
+  target_include_directories(${_target} PRIVATE ${TIMESTRAL_ORT_INCLUDE_DIR})
+  target_link_libraries(${_target} onnxruntime::onnxruntime)
+endforeach()
 
 install(
   TARGETS ${EXTENSION_NAME}
