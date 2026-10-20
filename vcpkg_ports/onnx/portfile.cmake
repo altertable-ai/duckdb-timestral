@@ -45,6 +45,9 @@ vcpkg_cmake_configure(
         -DONNX_USE_MSVC_STATIC_RUNTIME=${USE_STATIC_RUNTIME}
         -DONNX_BUILD_TESTS=OFF
         -DONNX_BUILD_CUSTOM_PROTOBUF=OFF
+        # timestral: onnxruntime registers the schemas itself and requires this (see its portfile warning);
+        # without it every model load prints hundreds of "already registered" schema errors.
+        -DONNX_DISABLE_STATIC_REGISTRATION=ON
     MAYBE_UNUSED_VARIABLES
         ONNX_USE_MSVC_STATIC_RUNTIME
         Python_EXECUTABLE
