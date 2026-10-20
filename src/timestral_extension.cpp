@@ -5,7 +5,8 @@
 #include "duckdb.hpp"
 #include "duckdb/function/scalar_function.hpp"
 
-#include <onnxruntime_c_api.h>
+#include "timestral/model_store.hpp"
+#include "timestral/ort_predictor.hpp"
 
 namespace duckdb {
 
@@ -14,7 +15,7 @@ static void TimestralVersionFun(DataChunk &args, ExpressionState &state, Vector 
 	TimestralExtension extension;
 	auto extension_version = extension.Version();
 	children[0]->SetValue(0, Value(extension_version.empty() ? "dev" : extension_version));
-	children[1]->SetValue(0, Value(OrtGetApiBase()->GetVersionString()));
+	children[1]->SetValue(0, Value(timestral::OrtBlockPredictor::RuntimeVersion()));
 	result.SetVectorType(VectorType::CONSTANT_VECTOR);
 }
 
@@ -24,6 +25,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ScalarFunction version("timestral_version", {}, version_type, TimestralVersionFun);
 	version.SetStability(FunctionStability::CONSISTENT);
 	loader.RegisterFunction(version);
+
+	timestral::RegisterModelStore(loader);
 }
 
 void TimestralExtension::Load(ExtensionLoader &loader) {
