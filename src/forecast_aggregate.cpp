@@ -7,6 +7,7 @@
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
 #include "duckdb/common/serializer/serializer.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
@@ -30,10 +31,31 @@ static const char *const QUANTILE_FIELDS[NUM_QUANTILES] = {"q01", "q05", "q10", 
                                                            "q35", "q40", "q45", "q50", "q55", "q60", "q65",
                                                            "q70", "q75", "q80", "q85", "q90", "q95", "q99"};
 
-static LogicalType ForecastEntryType(const LogicalType &ts_type) {
-	child_list_t<LogicalType> fields {{"ts", ts_type}, {"forecast", LogicalType::DOUBLE}};
+vector<string> ForecastValueFields() {
+	vector<string> names {"forecast"};
 	for (auto name : QUANTILE_FIELDS) {
-		fields.emplace_back(name, LogicalType::DOUBLE);
+		names.emplace_back(name);
+	}
+	return names;
+}
+
+string ForecastTimeField(const string &input_name) {
+	if (input_name.empty()) {
+		return "ts";
+	}
+	for (auto &name : ForecastValueFields()) {
+		if (StringUtil::CIEquals(name, input_name)) {
+			return "ts";
+		}
+	}
+	return input_name;
+}
+
+static LogicalType ForecastEntryType(const LogicalType &ts_type, const string &ts_name = "ts") {
+	child_list_t<LogicalType> fields;
+	fields.emplace_back(Identifier(ts_name), ts_type);
+	for (auto &name : ForecastValueFields()) {
+		fields.emplace_back(Identifier(name), LogicalType::DOUBLE);
 	}
 	return LogicalType::LIST(LogicalType::STRUCT(std::move(fields)));
 }
@@ -52,6 +74,8 @@ static bool IsTemporal(const LogicalType &type) {
 struct ForecastBindData : public FunctionData {
 	idx_t horizon = 0;
 	LogicalType ts_type;
+	//! Name of the time field: the input column's name, or "ts".
+	string ts_name;
 	bool has_step = false;
 	GridStep step;
 	//! The database whose task scheduler runs the forecasts.
@@ -64,6 +88,7 @@ struct ForecastBindData : public FunctionData {
 		auto copy = make_uniq<ForecastBindData>();
 		copy->horizon = horizon;
 		copy->ts_type = ts_type;
+		copy->ts_name = ts_name;
 		copy->has_step = has_step;
 		copy->step = step;
 		copy->db = db;
@@ -73,9 +98,9 @@ struct ForecastBindData : public FunctionData {
 	}
 	bool Equals(const FunctionData &other_p) const override {
 		auto &other = other_p.Cast<ForecastBindData>();
-		return horizon == other.horizon && ts_type == other.ts_type && has_step == other.has_step &&
-		       step.is_interval == other.step.is_interval && step.width == other.step.width &&
-		       step.interval == other.step.interval && predictor == other.predictor;
+		return horizon == other.horizon && ts_type == other.ts_type && ts_name == other.ts_name &&
+		       has_step == other.has_step && step.is_interval == other.step.is_interval &&
+		       step.width == other.step.width && step.interval == other.step.interval && predictor == other.predictor;
 	}
 };
 
@@ -137,11 +162,11 @@ static Value TimestampValue(const LogicalType &type, int64_t ts) {
 
 static string OffGridHint(const LogicalType &type, bool explicit_step) {
 	if (!IsTemporal(type)) {
-		return explicit_step ? "use time_bucket to align the timestamps" : "pass freq or use time_bucket";
+		return explicit_step ? "use time_bucket to align the timestamps" : "pass EVERY or use time_bucket";
 	}
 	string hint = explicit_step ? "use time_bucket to align the timestamps"
-	                            : "pass an explicit freq, e.g. {'freq': INTERVAL '1 month'} (calendar frequencies are "
-	                              "not inferred), or use time_bucket";
+	                            : "pass an explicit step, e.g. EVERY INTERVAL '1 month' (calendar steps are not "
+	                              "inferred), or use time_bucket";
 	if (type.id() == LogicalTypeId::TIMESTAMP_TZ) {
 		hint += ". TIMESTAMPTZ values are UTC instants, so local-time data shifts across daylight saving changes: "
 		        "cast to TIMESTAMP in the local time zone first, or use time_bucket";
@@ -328,38 +353,38 @@ static void ForecastDestroy(Vector &states, AggregateInputData &, idx_t count) {
 //===--------------------------------------------------------------------===//
 // Bind
 //===--------------------------------------------------------------------===//
-static GridStep ParseFreq(const Value &freq, const LogicalType &ts_type) {
+static GridStep ParseEvery(const Value &every, const LogicalType &ts_type) {
 	GridStep step;
 	if (!IsTemporal(ts_type)) {
-		if (!freq.type().IsIntegral()) {
-			throw BinderException("timestral: freq for integer time steps must be an integer");
+		if (!every.type().IsIntegral()) {
+			throw BinderException("timestral: EVERY for integer time steps must be an integer");
 		}
-		step.width = freq.GetValue<int64_t>();
+		step.width = every.GetValue<int64_t>();
 		if (step.width <= 0) {
-			throw BinderException("timestral: freq must be positive");
+			throw BinderException("timestral: EVERY must be positive");
 		}
 		return step;
 	}
-	if (freq.type().id() != LogicalTypeId::INTERVAL) {
-		throw BinderException("timestral: freq for %s values must be an INTERVAL", ts_type.ToString());
+	if (every.type().id() != LogicalTypeId::INTERVAL) {
+		throw BinderException("timestral: EVERY for %s values must be an INTERVAL", ts_type.ToString());
 	}
-	auto interval = freq.GetValue<interval_t>();
+	auto interval = every.GetValue<interval_t>();
 	step.is_interval = true;
 	step.interval = interval;
 	if (interval.months != 0) {
 		if (interval.days != 0 || interval.micros != 0) {
-			throw BinderException("timestral: freq must be either a fixed duration or a whole number of months");
+			throw BinderException("timestral: EVERY must be either a fixed duration or a whole number of months");
 		}
 		if (interval.months < 0) {
-			throw BinderException("timestral: freq must be positive");
+			throw BinderException("timestral: EVERY must be positive");
 		}
 		return step;
 	}
 	if (!Interval::TryGetMicro(interval, step.width) || step.width <= 0) {
-		throw BinderException("timestral: freq must be positive");
+		throw BinderException("timestral: EVERY must be positive");
 	}
 	if (ts_type.id() == LogicalTypeId::DATE && step.width % MICROS_PER_DAY != 0) {
-		throw BinderException("timestral: freq for DATE values must be a whole number of days or months");
+		throw BinderException("timestral: EVERY for DATE values must be a whole number of days or months");
 	}
 	return step;
 }
@@ -369,6 +394,7 @@ static unique_ptr<FunctionData> ForecastBind(BindAggregateFunctionInput &input) 
 	auto &arguments = input.GetArguments();
 	auto bind = make_uniq<ForecastBindData>();
 	bind->ts_type = arguments[0]->GetReturnType();
+	bind->ts_name = ForecastTimeField(arguments[0]->GetAlias().GetIdentifierName());
 	bind->db = context.db;
 	auto &horizon_expr = *arguments[2];
 	if (!horizon_expr.IsFoldable()) {
@@ -389,7 +415,7 @@ static unique_ptr<FunctionData> ForecastBind(BindAggregateFunctionInput &input) 
 	if (arguments.size() > 3 && arguments[3]->GetReturnType().id() != LogicalTypeId::SQLNULL) {
 		auto &options_expr = *arguments[3];
 		if (!options_expr.IsFoldable() || options_expr.GetReturnType().id() != LogicalTypeId::STRUCT) {
-			throw BinderException("timestral: options must be a constant STRUCT, e.g. {'freq': INTERVAL '1 hour'}");
+			throw BinderException("timestral: options must be a constant STRUCT, e.g. {'every': INTERVAL '1 hour'}");
 		}
 		auto options = ExpressionExecutor::EvaluateScalar(context, options_expr);
 		auto &fields = StructType::GetChildTypes(options.type());
@@ -401,13 +427,13 @@ static unique_ptr<FunctionData> ForecastBind(BindAggregateFunctionInput &input) 
 				if (!value.IsNull()) {
 					model = value.ToString();
 				}
-			} else if (key == "freq") {
+			} else if (key == "every") {
 				if (!value.IsNull()) {
-					bind->step = ParseFreq(value, bind->ts_type);
+					bind->step = ParseEvery(value, bind->ts_type);
 					bind->has_step = true;
 				}
 			} else {
-				throw BinderException("timestral: unknown option '%s' (valid options: model, freq)",
+				throw BinderException("timestral: unknown option '%s' (valid options: model, every)",
 				                      fields[i].first.GetIdentifierName());
 			}
 		}
@@ -415,7 +441,7 @@ static unique_ptr<FunctionData> ForecastBind(BindAggregateFunctionInput &input) 
 	// The model is resolved (and downloaded if needed) at bind time, so a missing model fails the query early.
 	bind->model = model;
 	bind->predictor = ModelStore::Instance().GetPredictor(context, model);
-	input.GetBoundFunction().SetReturnType(ForecastEntryType(bind->ts_type));
+	input.GetBoundFunction().SetReturnType(ForecastEntryType(bind->ts_type, bind->ts_name));
 	return std::move(bind);
 }
 
@@ -432,6 +458,7 @@ static void ForecastSerialize(Serializer &serializer, const optional_ptr<Functio
 	serializer.WriteProperty(106, "step_days", bind.step.interval.days);
 	serializer.WriteProperty(107, "step_micros", bind.step.interval.micros);
 	serializer.WriteProperty(108, "model", bind.model);
+	serializer.WritePropertyWithDefault<string>(109, "ts_name", bind.ts_name, "ts");
 }
 
 static unique_ptr<FunctionData> ForecastDeserialize(Deserializer &deserializer, BoundAggregateFunction &function) {
@@ -446,9 +473,10 @@ static unique_ptr<FunctionData> ForecastDeserialize(Deserializer &deserializer, 
 	bind->step.interval.days = deserializer.ReadProperty<int32_t>(106, "step_days");
 	bind->step.interval.micros = deserializer.ReadProperty<int64_t>(107, "step_micros");
 	bind->model = deserializer.ReadProperty<string>(108, "model");
+	bind->ts_name = deserializer.ReadPropertyWithExplicitDefault<string>(109, "ts_name", "ts");
 	bind->db = context.db;
 	bind->predictor = ModelStore::Instance().GetPredictor(context, bind->model);
-	function.SetReturnType(ForecastEntryType(bind->ts_type));
+	function.SetReturnType(ForecastEntryType(bind->ts_type, bind->ts_name));
 	return std::move(bind);
 }
 

@@ -8,7 +8,12 @@ a statically linked [ONNX Runtime](https://onnxruntime.ai/), and every forecast 
 LOAD timestral;
 
 SELECT store, ts, forecast, q10, q90
-FROM timestral_forecast_by('sales', 'store', 'ts', 'amount', 24);
+FROM sales TIMESTRAL_FORECAST (
+    amount
+    PARTITION BY store
+    ORDER BY ts
+    HORIZON 24
+);
 ```
 
 | store | ts                  | forecast | q10   | q90   |
@@ -36,56 +41,102 @@ LOAD 'build/release/extension/timestral/timestral.duckdb_extension';
 
 Once published, it will install with `INSTALL timestral FROM community; LOAD timestral;`.
 
+`LOAD` adds the `TIMESTRAL_FORECAST` syntax to every connection. A connection that was already open, including
+the one running `LOAD`, switches once its current query ends, so send `LOAD timestral` and the first
+`TIMESTRAL_FORECAST` query as two separate statements, not as one string.
+
 On first use the extension downloads the selected model from `https://assets.altertable.ai/timestral/v1/`,
 checks its SHA-256, and caches it in `~/.duckdb/timestral/v1/`.
 
 ## Forecasting
 
-### `timestral_forecast(ts, value, horizon [, options])`
+### `FROM … TIMESTRAL_FORECAST (…)`
 
-`timestral_forecast` is an aggregate: each group is one series. It returns a list with one entry per future step:
+`TIMESTRAL_FORECAST` follows a relation in `FROM`, like `PIVOT`. It returns one row per (series, future step):
+
+```
+FROM relation [alias]
+TIMESTRAL_FORECAST (
+    value
+    [ PARTITION BY expr [, ...] ]
+    ORDER BY time
+    HORIZON n
+    [ EVERY step ]
+    [ USING MODEL '5m' | '28m' | '123m' | '209m' ]
+    [ WITH HISTORY ]
+) [alias]
+```
 
 ```sql
-SELECT store, unnest(timestral_forecast(ts, amount, 24), recursive := true)
+FROM monthly_revenue TIMESTRAL_FORECAST (
+    revenue
+    PARTITION BY region
+    ORDER BY month
+    HORIZON 12
+    EVERY INTERVAL '1 month'
+    USING MODEL '28m'
+);
+```
+
+| Part | Meaning |
+|---|---|
+| `value` | Observed value, any numeric expression. `NULL`, `NaN` and `±inf` count as missing. |
+| `PARTITION BY` | One series per distinct value. Without it the whole relation is one series. |
+| `ORDER BY` | Time of each observation: `TIMESTAMP`, `TIMESTAMPTZ`, `DATE`, `BIGINT` or `INTEGER`, ascending. Rows do not need to be ordered. |
+| `HORIZON` | Number of future steps, a constant from 1 to 100,000. Required. |
+| `EVERY` | The step: an `INTERVAL`, or an integer for integer time. Inferred when omitted (see below). |
+| `USING MODEL` | Model size for this query, overriding `SET timestral_model`. |
+| `WITH HISTORY` | Also return the observed rows (see below). |
+
+`HORIZON`, `EVERY`, `USING MODEL` and `WITH HISTORY` can come in any order.
+
+The output columns are:
+1. The `PARTITION BY` expressions. A column keeps its name; another expression gets DuckDB's usual name, for
+   example `(shop % 2)`.
+2. The time, under the `ORDER BY` column's name (`ts` when it is an expression), with the input's type.
+3. `forecast`, the median (`q50`).
+4. `q01`, `q05`, `q10` … `q95`, `q99`, the model's 21 quantiles.
+
+`WITH HISTORY` returns the observed rows too, so one query can feed a chart. It adds the value column under its
+own name (`value` when it is an expression), which is `NULL` on forecast rows, and an `is_forecast` column.
+`forecast` and the quantiles are `NULL` on observed rows.
+
+The clause is rewritten into plain SQL around the `timestral_forecast` aggregate, so it works in CTEs,
+subqueries, joins, prepared statements (`HORIZON $1`), views and table macros. A stored view or macro keeps
+the rewritten SQL. Add an outer `ORDER BY` when the order of the rows matters.
+
+### `timestral_forecast(…)`
+
+`timestral_forecast` is the aggregate behind the clause: each group is one series, and it returns a list with one
+entry per future step. It takes the clause's words:
+
+```sql
+SELECT store, unnest(timestral_forecast(amount ORDER BY ts HORIZON 24 USING MODEL '28m'), recursive := true)
 FROM sales
 GROUP BY store;
 ```
 
-| Argument | Type | Meaning |
-|---|---|---|
-| `ts` | `TIMESTAMP`, `TIMESTAMPTZ`, `DATE`, `BIGINT`, `INTEGER` | Time of each observation. Rows do not need to be ordered. |
-| `value` | any numeric | Observed value. `NULL`, `NaN` and `±inf` count as missing. |
-| `horizon` | constant integer, 1 to 100,000 | Number of future steps. |
-| `options` | constant `STRUCT`, optional | `model`: `'5m'`, `'28m'`, `'123m'` or `'209m'`. `freq`: the step, an `INTERVAL` (or an integer for integer `ts`). |
+It also has a positional form, `timestral_forecast(time, value, horizon [, options])`, where `options` is a
+constant `STRUCT` with `model` and `every` fields, for example `{'model': '28m', 'every': INTERVAL '1 month'}`.
+Both forms take the same arguments as the clause, except `WITH HISTORY`.
 
-Each entry is `STRUCT(ts, forecast, q01, q05, q10, …, q95, q99)`:
-- `ts` has the input's type.
-- `forecast` is the median (`q50`).
-- `q01` to `q99` are the model's 21 quantiles.
+Each entry is `STRUCT(time, forecast, q01, q05, q10, …, q95, q99)`. The time field is named after the time
+column, or `ts` when the time is an expression.
 
-How the time grid is built:
-- **Step.** The step is the most common gap between consecutive timestamps, unless you pass `freq`. Monthly,
-  quarterly and yearly data must pass `freq`, for example `{'freq': INTERVAL '1 month'}`, because calendar
-  frequencies are not inferred from day counts.
+### How the time grid is built
+
+- **Step.** The step is the most common gap between consecutive timestamps, unless you pass `EVERY`. Monthly,
+  quarterly and yearly data must pass `EVERY`, for example `EVERY INTERVAL '1 month'`, because calendar steps
+  are not inferred from day counts.
   Calendar steps fall on the series' largest day of the month, clamped to each month's length, so month-end
   data stays on month ends (Jan 31, Feb 28, Mar 31…).
 - **Gaps.** Missing grid points and `NULL` values are missing values, which the model handles.
 - **Forecast start.** The forecast starts one step after the series' last row. If the last rows have `NULL`
   values, they still count as part of the history, so adding `NULL` rows moves the forecast start forward.
 - **Duplicates and off-grid timestamps.** These raise an error. Pre-aggregate with `time_bucket` first.
-- **Empty series.** A series with no observed value, or with a single row and no `freq`, returns `NULL`
-  instead of failing the query.
+- **Empty series.** A series with no observed value, or with a single row and no `EVERY`, has no forecast rows
+  (the aggregate returns `NULL`) instead of failing the query.
 - **Long histories.** Only the last 32,768 steps are used (the model's context length).
-
-### `timestral_forecast_by(table, group_by, ts, value, horizon [, options := …])`
-
-`timestral_forecast_by` is a table macro around the aggregate. It returns one row per (group, step), with the
-group column under its own name followed by `ts, forecast, q01 … q99`. Column names are given as strings and
-matched exactly.
-
-```sql
-FROM timestral_forecast_by('sales', 'store', 'ts', 'amount', 12, options := {'freq': INTERVAL '1 month'});
-```
 
 ### Choosing a model
 
@@ -98,7 +149,7 @@ FROM timestral_forecast_by('sales', 'store', 'ts', 'amount', 12, options := {'fr
 
 \* Apple M4 Pro, 14 threads. The accuracy figures are Mistral's published GIFT-Eval results.
 
-Use `SET timestral_model = '28m'` to change the default, or pass `{'model': '28m'}` to a single call.
+Use `SET timestral_model = '28m'` to change the default, or `USING MODEL '28m'` for a single query.
 
 ## Settings
 
@@ -130,6 +181,11 @@ single-block forecast to ONNX: normalisation, patching, the transformer and the 
 logic around it is ported to C++ in `src/forecaster.cpp`, following the reference function by function. That logic
 covers block-by-block rollout for long horizons, refined scaling, quantile capping, symmetric averaging and
 non-negative clipping.
+
+`TIMESTRAL_FORECAST` and the `timestral_forecast(value ORDER BY …)` spelling are additions to DuckDB's PEG
+grammar, registered as the `timestral` grammar extension (`src/forecast_grammar.cpp`). They only add rules and
+choices: no stock rule is replaced, so they combine with other grammar extensions. `SET
+active_grammar_extensions` turns them off for a connection.
 
 The parity tests in `test/sql/parity_*.test` compare all 21 quantiles with Mistral's PyTorch output on 14 cases.
 Those cases include long contexts, horizons beyond 1,024 steps, missing values and very large magnitudes. The

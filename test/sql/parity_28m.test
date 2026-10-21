@@ -20,7 +20,7 @@ WITH f AS (
 e AS (SELECT * FROM 'test/data/parity/28m/short_20_expected.csv'),
 s AS (SELECT series_id, greatest(max(abs(q01)), max(abs(q99)), 1e-6) AS scale FROM e GROUP BY ALL)
 SELECT count(*) = (SELECT count(*) FROM e) AND bool_and(abs(f.q01 - e.q01) <= 0.0001 * s.scale AND abs(f.q05 - e.q05) <= 0.0001 * s.scale AND abs(f.q10 - e.q10) <= 0.0001 * s.scale AND abs(f.q15 - e.q15) <= 0.0001 * s.scale AND abs(f.q20 - e.q20) <= 0.0001 * s.scale AND abs(f.q25 - e.q25) <= 0.0001 * s.scale AND abs(f.q30 - e.q30) <= 0.0001 * s.scale AND abs(f.q35 - e.q35) <= 0.0001 * s.scale AND abs(f.q40 - e.q40) <= 0.0001 * s.scale AND abs(f.q45 - e.q45) <= 0.0001 * s.scale AND abs(f.q50 - e.q50) <= 0.0001 * s.scale AND abs(f.q55 - e.q55) <= 0.0001 * s.scale AND abs(f.q60 - e.q60) <= 0.0001 * s.scale AND abs(f.q65 - e.q65) <= 0.0001 * s.scale AND abs(f.q70 - e.q70) <= 0.0001 * s.scale AND abs(f.q75 - e.q75) <= 0.0001 * s.scale AND abs(f.q80 - e.q80) <= 0.0001 * s.scale AND abs(f.q85 - e.q85) <= 0.0001 * s.scale AND abs(f.q90 - e.q90) <= 0.0001 * s.scale AND abs(f.q95 - e.q95) <= 0.0001 * s.scale AND abs(f.q99 - e.q99) <= 0.0001 * s.scale AND f.forecast = f.q50)
-FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY ts) AS step FROM f) f
+FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY t) AS step FROM f) f
 JOIN e USING (series_id, step)
 JOIN s USING (series_id);
 ----
@@ -33,7 +33,7 @@ WITH f AS (
 e AS (SELECT * FROM 'test/data/parity/28m/one_patch_expected.csv'),
 s AS (SELECT series_id, greatest(max(abs(q01)), max(abs(q99)), 1e-6) AS scale FROM e GROUP BY ALL)
 SELECT count(*) = (SELECT count(*) FROM e) AND bool_and(abs(f.q01 - e.q01) <= 0.0001 * s.scale AND abs(f.q05 - e.q05) <= 0.0001 * s.scale AND abs(f.q10 - e.q10) <= 0.0001 * s.scale AND abs(f.q15 - e.q15) <= 0.0001 * s.scale AND abs(f.q20 - e.q20) <= 0.0001 * s.scale AND abs(f.q25 - e.q25) <= 0.0001 * s.scale AND abs(f.q30 - e.q30) <= 0.0001 * s.scale AND abs(f.q35 - e.q35) <= 0.0001 * s.scale AND abs(f.q40 - e.q40) <= 0.0001 * s.scale AND abs(f.q45 - e.q45) <= 0.0001 * s.scale AND abs(f.q50 - e.q50) <= 0.0001 * s.scale AND abs(f.q55 - e.q55) <= 0.0001 * s.scale AND abs(f.q60 - e.q60) <= 0.0001 * s.scale AND abs(f.q65 - e.q65) <= 0.0001 * s.scale AND abs(f.q70 - e.q70) <= 0.0001 * s.scale AND abs(f.q75 - e.q75) <= 0.0001 * s.scale AND abs(f.q80 - e.q80) <= 0.0001 * s.scale AND abs(f.q85 - e.q85) <= 0.0001 * s.scale AND abs(f.q90 - e.q90) <= 0.0001 * s.scale AND abs(f.q95 - e.q95) <= 0.0001 * s.scale AND abs(f.q99 - e.q99) <= 0.0001 * s.scale AND f.forecast = f.q50)
-FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY ts) AS step FROM f) f
+FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY t) AS step FROM f) f
 JOIN e USING (series_id, step)
 JOIN s USING (series_id);
 ----
@@ -46,7 +46,7 @@ WITH f AS (
 e AS (SELECT * FROM 'test/data/parity/28m/non_multiple_expected.csv'),
 s AS (SELECT series_id, greatest(max(abs(q01)), max(abs(q99)), 1e-6) AS scale FROM e GROUP BY ALL)
 SELECT count(*) = (SELECT count(*) FROM e) AND bool_and(abs(f.q01 - e.q01) <= 0.0001 * s.scale AND abs(f.q05 - e.q05) <= 0.0001 * s.scale AND abs(f.q10 - e.q10) <= 0.0001 * s.scale AND abs(f.q15 - e.q15) <= 0.0001 * s.scale AND abs(f.q20 - e.q20) <= 0.0001 * s.scale AND abs(f.q25 - e.q25) <= 0.0001 * s.scale AND abs(f.q30 - e.q30) <= 0.0001 * s.scale AND abs(f.q35 - e.q35) <= 0.0001 * s.scale AND abs(f.q40 - e.q40) <= 0.0001 * s.scale AND abs(f.q45 - e.q45) <= 0.0001 * s.scale AND abs(f.q50 - e.q50) <= 0.0001 * s.scale AND abs(f.q55 - e.q55) <= 0.0001 * s.scale AND abs(f.q60 - e.q60) <= 0.0001 * s.scale AND abs(f.q65 - e.q65) <= 0.0001 * s.scale AND abs(f.q70 - e.q70) <= 0.0001 * s.scale AND abs(f.q75 - e.q75) <= 0.0001 * s.scale AND abs(f.q80 - e.q80) <= 0.0001 * s.scale AND abs(f.q85 - e.q85) <= 0.0001 * s.scale AND abs(f.q90 - e.q90) <= 0.0001 * s.scale AND abs(f.q95 - e.q95) <= 0.0001 * s.scale AND abs(f.q99 - e.q99) <= 0.0001 * s.scale AND f.forecast = f.q50)
-FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY ts) AS step FROM f) f
+FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY t) AS step FROM f) f
 JOIN e USING (series_id, step)
 JOIN s USING (series_id);
 ----
@@ -59,7 +59,7 @@ WITH f AS (
 e AS (SELECT * FROM 'test/data/parity/28m/long_truncate_expected.csv'),
 s AS (SELECT series_id, greatest(max(abs(q01)), max(abs(q99)), 1e-6) AS scale FROM e GROUP BY ALL)
 SELECT count(*) = (SELECT count(*) FROM e) AND bool_and(abs(f.q01 - e.q01) <= 0.0001 * s.scale AND abs(f.q05 - e.q05) <= 0.0001 * s.scale AND abs(f.q10 - e.q10) <= 0.0001 * s.scale AND abs(f.q15 - e.q15) <= 0.0001 * s.scale AND abs(f.q20 - e.q20) <= 0.0001 * s.scale AND abs(f.q25 - e.q25) <= 0.0001 * s.scale AND abs(f.q30 - e.q30) <= 0.0001 * s.scale AND abs(f.q35 - e.q35) <= 0.0001 * s.scale AND abs(f.q40 - e.q40) <= 0.0001 * s.scale AND abs(f.q45 - e.q45) <= 0.0001 * s.scale AND abs(f.q50 - e.q50) <= 0.0001 * s.scale AND abs(f.q55 - e.q55) <= 0.0001 * s.scale AND abs(f.q60 - e.q60) <= 0.0001 * s.scale AND abs(f.q65 - e.q65) <= 0.0001 * s.scale AND abs(f.q70 - e.q70) <= 0.0001 * s.scale AND abs(f.q75 - e.q75) <= 0.0001 * s.scale AND abs(f.q80 - e.q80) <= 0.0001 * s.scale AND abs(f.q85 - e.q85) <= 0.0001 * s.scale AND abs(f.q90 - e.q90) <= 0.0001 * s.scale AND abs(f.q95 - e.q95) <= 0.0001 * s.scale AND abs(f.q99 - e.q99) <= 0.0001 * s.scale AND f.forecast = f.q50)
-FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY ts) AS step FROM f) f
+FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY t) AS step FROM f) f
 JOIN e USING (series_id, step)
 JOIN s USING (series_id);
 ----
@@ -72,7 +72,7 @@ WITH f AS (
 e AS (SELECT * FROM 'test/data/parity/28m/horizon_1_expected.csv'),
 s AS (SELECT series_id, greatest(max(abs(q01)), max(abs(q99)), 1e-6) AS scale FROM e GROUP BY ALL)
 SELECT count(*) = (SELECT count(*) FROM e) AND bool_and(abs(f.q01 - e.q01) <= 0.0001 * s.scale AND abs(f.q05 - e.q05) <= 0.0001 * s.scale AND abs(f.q10 - e.q10) <= 0.0001 * s.scale AND abs(f.q15 - e.q15) <= 0.0001 * s.scale AND abs(f.q20 - e.q20) <= 0.0001 * s.scale AND abs(f.q25 - e.q25) <= 0.0001 * s.scale AND abs(f.q30 - e.q30) <= 0.0001 * s.scale AND abs(f.q35 - e.q35) <= 0.0001 * s.scale AND abs(f.q40 - e.q40) <= 0.0001 * s.scale AND abs(f.q45 - e.q45) <= 0.0001 * s.scale AND abs(f.q50 - e.q50) <= 0.0001 * s.scale AND abs(f.q55 - e.q55) <= 0.0001 * s.scale AND abs(f.q60 - e.q60) <= 0.0001 * s.scale AND abs(f.q65 - e.q65) <= 0.0001 * s.scale AND abs(f.q70 - e.q70) <= 0.0001 * s.scale AND abs(f.q75 - e.q75) <= 0.0001 * s.scale AND abs(f.q80 - e.q80) <= 0.0001 * s.scale AND abs(f.q85 - e.q85) <= 0.0001 * s.scale AND abs(f.q90 - e.q90) <= 0.0001 * s.scale AND abs(f.q95 - e.q95) <= 0.0001 * s.scale AND abs(f.q99 - e.q99) <= 0.0001 * s.scale AND f.forecast = f.q50)
-FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY ts) AS step FROM f) f
+FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY t) AS step FROM f) f
 JOIN e USING (series_id, step)
 JOIN s USING (series_id);
 ----
@@ -85,7 +85,7 @@ WITH f AS (
 e AS (SELECT * FROM 'test/data/parity/28m/rollout_1500_expected.csv'),
 s AS (SELECT series_id, greatest(max(abs(q01)), max(abs(q99)), 1e-6) AS scale FROM e GROUP BY ALL)
 SELECT count(*) = (SELECT count(*) FROM e) AND bool_and(abs(f.q01 - e.q01) <= 0.0001 * s.scale AND abs(f.q05 - e.q05) <= 0.0001 * s.scale AND abs(f.q10 - e.q10) <= 0.0001 * s.scale AND abs(f.q15 - e.q15) <= 0.0001 * s.scale AND abs(f.q20 - e.q20) <= 0.0001 * s.scale AND abs(f.q25 - e.q25) <= 0.0001 * s.scale AND abs(f.q30 - e.q30) <= 0.0001 * s.scale AND abs(f.q35 - e.q35) <= 0.0001 * s.scale AND abs(f.q40 - e.q40) <= 0.0001 * s.scale AND abs(f.q45 - e.q45) <= 0.0001 * s.scale AND abs(f.q50 - e.q50) <= 0.0001 * s.scale AND abs(f.q55 - e.q55) <= 0.0001 * s.scale AND abs(f.q60 - e.q60) <= 0.0001 * s.scale AND abs(f.q65 - e.q65) <= 0.0001 * s.scale AND abs(f.q70 - e.q70) <= 0.0001 * s.scale AND abs(f.q75 - e.q75) <= 0.0001 * s.scale AND abs(f.q80 - e.q80) <= 0.0001 * s.scale AND abs(f.q85 - e.q85) <= 0.0001 * s.scale AND abs(f.q90 - e.q90) <= 0.0001 * s.scale AND abs(f.q95 - e.q95) <= 0.0001 * s.scale AND abs(f.q99 - e.q99) <= 0.0001 * s.scale AND f.forecast = f.q50)
-FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY ts) AS step FROM f) f
+FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY t) AS step FROM f) f
 JOIN e USING (series_id, step)
 JOIN s USING (series_id);
 ----
@@ -98,7 +98,7 @@ WITH f AS (
 e AS (SELECT * FROM 'test/data/parity/28m/interior_nulls_expected.csv'),
 s AS (SELECT series_id, greatest(max(abs(q01)), max(abs(q99)), 1e-6) AS scale FROM e GROUP BY ALL)
 SELECT count(*) = (SELECT count(*) FROM e) AND bool_and(abs(f.q01 - e.q01) <= 0.0001 * s.scale AND abs(f.q05 - e.q05) <= 0.0001 * s.scale AND abs(f.q10 - e.q10) <= 0.0001 * s.scale AND abs(f.q15 - e.q15) <= 0.0001 * s.scale AND abs(f.q20 - e.q20) <= 0.0001 * s.scale AND abs(f.q25 - e.q25) <= 0.0001 * s.scale AND abs(f.q30 - e.q30) <= 0.0001 * s.scale AND abs(f.q35 - e.q35) <= 0.0001 * s.scale AND abs(f.q40 - e.q40) <= 0.0001 * s.scale AND abs(f.q45 - e.q45) <= 0.0001 * s.scale AND abs(f.q50 - e.q50) <= 0.0001 * s.scale AND abs(f.q55 - e.q55) <= 0.0001 * s.scale AND abs(f.q60 - e.q60) <= 0.0001 * s.scale AND abs(f.q65 - e.q65) <= 0.0001 * s.scale AND abs(f.q70 - e.q70) <= 0.0001 * s.scale AND abs(f.q75 - e.q75) <= 0.0001 * s.scale AND abs(f.q80 - e.q80) <= 0.0001 * s.scale AND abs(f.q85 - e.q85) <= 0.0001 * s.scale AND abs(f.q90 - e.q90) <= 0.0001 * s.scale AND abs(f.q95 - e.q95) <= 0.0001 * s.scale AND abs(f.q99 - e.q99) <= 0.0001 * s.scale AND f.forecast = f.q50)
-FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY ts) AS step FROM f) f
+FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY t) AS step FROM f) f
 JOIN e USING (series_id, step)
 JOIN s USING (series_id);
 ----
@@ -111,7 +111,7 @@ WITH f AS (
 e AS (SELECT * FROM 'test/data/parity/28m/leading_nulls_expected.csv'),
 s AS (SELECT series_id, greatest(max(abs(q01)), max(abs(q99)), 1e-6) AS scale FROM e GROUP BY ALL)
 SELECT count(*) = (SELECT count(*) FROM e) AND bool_and(abs(f.q01 - e.q01) <= 0.0001 * s.scale AND abs(f.q05 - e.q05) <= 0.0001 * s.scale AND abs(f.q10 - e.q10) <= 0.0001 * s.scale AND abs(f.q15 - e.q15) <= 0.0001 * s.scale AND abs(f.q20 - e.q20) <= 0.0001 * s.scale AND abs(f.q25 - e.q25) <= 0.0001 * s.scale AND abs(f.q30 - e.q30) <= 0.0001 * s.scale AND abs(f.q35 - e.q35) <= 0.0001 * s.scale AND abs(f.q40 - e.q40) <= 0.0001 * s.scale AND abs(f.q45 - e.q45) <= 0.0001 * s.scale AND abs(f.q50 - e.q50) <= 0.0001 * s.scale AND abs(f.q55 - e.q55) <= 0.0001 * s.scale AND abs(f.q60 - e.q60) <= 0.0001 * s.scale AND abs(f.q65 - e.q65) <= 0.0001 * s.scale AND abs(f.q70 - e.q70) <= 0.0001 * s.scale AND abs(f.q75 - e.q75) <= 0.0001 * s.scale AND abs(f.q80 - e.q80) <= 0.0001 * s.scale AND abs(f.q85 - e.q85) <= 0.0001 * s.scale AND abs(f.q90 - e.q90) <= 0.0001 * s.scale AND abs(f.q95 - e.q95) <= 0.0001 * s.scale AND abs(f.q99 - e.q99) <= 0.0001 * s.scale AND f.forecast = f.q50)
-FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY ts) AS step FROM f) f
+FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY t) AS step FROM f) f
 JOIN e USING (series_id, step)
 JOIN s USING (series_id);
 ----
@@ -124,7 +124,7 @@ WITH f AS (
 e AS (SELECT * FROM 'test/data/parity/28m/trailing_nulls_expected.csv'),
 s AS (SELECT series_id, greatest(max(abs(q01)), max(abs(q99)), 1e-6) AS scale FROM e GROUP BY ALL)
 SELECT count(*) = (SELECT count(*) FROM e) AND bool_and(abs(f.q01 - e.q01) <= 0.0001 * s.scale AND abs(f.q05 - e.q05) <= 0.0001 * s.scale AND abs(f.q10 - e.q10) <= 0.0001 * s.scale AND abs(f.q15 - e.q15) <= 0.0001 * s.scale AND abs(f.q20 - e.q20) <= 0.0001 * s.scale AND abs(f.q25 - e.q25) <= 0.0001 * s.scale AND abs(f.q30 - e.q30) <= 0.0001 * s.scale AND abs(f.q35 - e.q35) <= 0.0001 * s.scale AND abs(f.q40 - e.q40) <= 0.0001 * s.scale AND abs(f.q45 - e.q45) <= 0.0001 * s.scale AND abs(f.q50 - e.q50) <= 0.0001 * s.scale AND abs(f.q55 - e.q55) <= 0.0001 * s.scale AND abs(f.q60 - e.q60) <= 0.0001 * s.scale AND abs(f.q65 - e.q65) <= 0.0001 * s.scale AND abs(f.q70 - e.q70) <= 0.0001 * s.scale AND abs(f.q75 - e.q75) <= 0.0001 * s.scale AND abs(f.q80 - e.q80) <= 0.0001 * s.scale AND abs(f.q85 - e.q85) <= 0.0001 * s.scale AND abs(f.q90 - e.q90) <= 0.0001 * s.scale AND abs(f.q95 - e.q95) <= 0.0001 * s.scale AND abs(f.q99 - e.q99) <= 0.0001 * s.scale AND f.forecast = f.q50)
-FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY ts) AS step FROM f) f
+FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY t) AS step FROM f) f
 JOIN e USING (series_id, step)
 JOIN s USING (series_id);
 ----
@@ -137,7 +137,7 @@ WITH f AS (
 e AS (SELECT * FROM 'test/data/parity/28m/constant_expected.csv'),
 s AS (SELECT series_id, greatest(max(abs(q01)), max(abs(q99)), 1e-6) AS scale FROM e GROUP BY ALL)
 SELECT count(*) = (SELECT count(*) FROM e) AND bool_and(abs(f.q01 - e.q01) <= 0.0001 * s.scale AND abs(f.q05 - e.q05) <= 0.0001 * s.scale AND abs(f.q10 - e.q10) <= 0.0001 * s.scale AND abs(f.q15 - e.q15) <= 0.0001 * s.scale AND abs(f.q20 - e.q20) <= 0.0001 * s.scale AND abs(f.q25 - e.q25) <= 0.0001 * s.scale AND abs(f.q30 - e.q30) <= 0.0001 * s.scale AND abs(f.q35 - e.q35) <= 0.0001 * s.scale AND abs(f.q40 - e.q40) <= 0.0001 * s.scale AND abs(f.q45 - e.q45) <= 0.0001 * s.scale AND abs(f.q50 - e.q50) <= 0.0001 * s.scale AND abs(f.q55 - e.q55) <= 0.0001 * s.scale AND abs(f.q60 - e.q60) <= 0.0001 * s.scale AND abs(f.q65 - e.q65) <= 0.0001 * s.scale AND abs(f.q70 - e.q70) <= 0.0001 * s.scale AND abs(f.q75 - e.q75) <= 0.0001 * s.scale AND abs(f.q80 - e.q80) <= 0.0001 * s.scale AND abs(f.q85 - e.q85) <= 0.0001 * s.scale AND abs(f.q90 - e.q90) <= 0.0001 * s.scale AND abs(f.q95 - e.q95) <= 0.0001 * s.scale AND abs(f.q99 - e.q99) <= 0.0001 * s.scale AND f.forecast = f.q50)
-FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY ts) AS step FROM f) f
+FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY t) AS step FROM f) f
 JOIN e USING (series_id, step)
 JOIN s USING (series_id);
 ----
@@ -150,7 +150,7 @@ WITH f AS (
 e AS (SELECT * FROM 'test/data/parity/28m/nonnegative_counts_expected.csv'),
 s AS (SELECT series_id, greatest(max(abs(q01)), max(abs(q99)), 1e-6) AS scale FROM e GROUP BY ALL)
 SELECT count(*) = (SELECT count(*) FROM e) AND bool_and(abs(f.q01 - e.q01) <= 0.0001 * s.scale AND abs(f.q05 - e.q05) <= 0.0001 * s.scale AND abs(f.q10 - e.q10) <= 0.0001 * s.scale AND abs(f.q15 - e.q15) <= 0.0001 * s.scale AND abs(f.q20 - e.q20) <= 0.0001 * s.scale AND abs(f.q25 - e.q25) <= 0.0001 * s.scale AND abs(f.q30 - e.q30) <= 0.0001 * s.scale AND abs(f.q35 - e.q35) <= 0.0001 * s.scale AND abs(f.q40 - e.q40) <= 0.0001 * s.scale AND abs(f.q45 - e.q45) <= 0.0001 * s.scale AND abs(f.q50 - e.q50) <= 0.0001 * s.scale AND abs(f.q55 - e.q55) <= 0.0001 * s.scale AND abs(f.q60 - e.q60) <= 0.0001 * s.scale AND abs(f.q65 - e.q65) <= 0.0001 * s.scale AND abs(f.q70 - e.q70) <= 0.0001 * s.scale AND abs(f.q75 - e.q75) <= 0.0001 * s.scale AND abs(f.q80 - e.q80) <= 0.0001 * s.scale AND abs(f.q85 - e.q85) <= 0.0001 * s.scale AND abs(f.q90 - e.q90) <= 0.0001 * s.scale AND abs(f.q95 - e.q95) <= 0.0001 * s.scale AND abs(f.q99 - e.q99) <= 0.0001 * s.scale AND f.forecast = f.q50)
-FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY ts) AS step FROM f) f
+FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY t) AS step FROM f) f
 JOIN e USING (series_id, step)
 JOIN s USING (series_id);
 ----
@@ -163,7 +163,7 @@ WITH f AS (
 e AS (SELECT * FROM 'test/data/parity/28m/large_magnitude_expected.csv'),
 s AS (SELECT series_id, greatest(max(abs(q01)), max(abs(q99)), 1e-6) AS scale FROM e GROUP BY ALL)
 SELECT count(*) = (SELECT count(*) FROM e) AND bool_and(abs(f.q01 - e.q01) <= 0.0001 * s.scale AND abs(f.q05 - e.q05) <= 0.0001 * s.scale AND abs(f.q10 - e.q10) <= 0.0001 * s.scale AND abs(f.q15 - e.q15) <= 0.0001 * s.scale AND abs(f.q20 - e.q20) <= 0.0001 * s.scale AND abs(f.q25 - e.q25) <= 0.0001 * s.scale AND abs(f.q30 - e.q30) <= 0.0001 * s.scale AND abs(f.q35 - e.q35) <= 0.0001 * s.scale AND abs(f.q40 - e.q40) <= 0.0001 * s.scale AND abs(f.q45 - e.q45) <= 0.0001 * s.scale AND abs(f.q50 - e.q50) <= 0.0001 * s.scale AND abs(f.q55 - e.q55) <= 0.0001 * s.scale AND abs(f.q60 - e.q60) <= 0.0001 * s.scale AND abs(f.q65 - e.q65) <= 0.0001 * s.scale AND abs(f.q70 - e.q70) <= 0.0001 * s.scale AND abs(f.q75 - e.q75) <= 0.0001 * s.scale AND abs(f.q80 - e.q80) <= 0.0001 * s.scale AND abs(f.q85 - e.q85) <= 0.0001 * s.scale AND abs(f.q90 - e.q90) <= 0.0001 * s.scale AND abs(f.q95 - e.q95) <= 0.0001 * s.scale AND abs(f.q99 - e.q99) <= 0.0001 * s.scale AND f.forecast = f.q50)
-FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY ts) AS step FROM f) f
+FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY t) AS step FROM f) f
 JOIN e USING (series_id, step)
 JOIN s USING (series_id);
 ----
@@ -176,7 +176,7 @@ WITH f AS (
 e AS (SELECT * FROM 'test/data/parity/28m/negative_expected.csv'),
 s AS (SELECT series_id, greatest(max(abs(q01)), max(abs(q99)), 1e-6) AS scale FROM e GROUP BY ALL)
 SELECT count(*) = (SELECT count(*) FROM e) AND bool_and(abs(f.q01 - e.q01) <= 0.0001 * s.scale AND abs(f.q05 - e.q05) <= 0.0001 * s.scale AND abs(f.q10 - e.q10) <= 0.0001 * s.scale AND abs(f.q15 - e.q15) <= 0.0001 * s.scale AND abs(f.q20 - e.q20) <= 0.0001 * s.scale AND abs(f.q25 - e.q25) <= 0.0001 * s.scale AND abs(f.q30 - e.q30) <= 0.0001 * s.scale AND abs(f.q35 - e.q35) <= 0.0001 * s.scale AND abs(f.q40 - e.q40) <= 0.0001 * s.scale AND abs(f.q45 - e.q45) <= 0.0001 * s.scale AND abs(f.q50 - e.q50) <= 0.0001 * s.scale AND abs(f.q55 - e.q55) <= 0.0001 * s.scale AND abs(f.q60 - e.q60) <= 0.0001 * s.scale AND abs(f.q65 - e.q65) <= 0.0001 * s.scale AND abs(f.q70 - e.q70) <= 0.0001 * s.scale AND abs(f.q75 - e.q75) <= 0.0001 * s.scale AND abs(f.q80 - e.q80) <= 0.0001 * s.scale AND abs(f.q85 - e.q85) <= 0.0001 * s.scale AND abs(f.q90 - e.q90) <= 0.0001 * s.scale AND abs(f.q95 - e.q95) <= 0.0001 * s.scale AND abs(f.q99 - e.q99) <= 0.0001 * s.scale AND f.forecast = f.q50)
-FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY ts) AS step FROM f) f
+FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY t) AS step FROM f) f
 JOIN e USING (series_id, step)
 JOIN s USING (series_id);
 ----
@@ -189,7 +189,7 @@ WITH f AS (
 e AS (SELECT * FROM 'test/data/parity/28m/multi_series_expected.csv'),
 s AS (SELECT series_id, greatest(max(abs(q01)), max(abs(q99)), 1e-6) AS scale FROM e GROUP BY ALL)
 SELECT count(*) = (SELECT count(*) FROM e) AND bool_and(abs(f.q01 - e.q01) <= 0.0001 * s.scale AND abs(f.q05 - e.q05) <= 0.0001 * s.scale AND abs(f.q10 - e.q10) <= 0.0001 * s.scale AND abs(f.q15 - e.q15) <= 0.0001 * s.scale AND abs(f.q20 - e.q20) <= 0.0001 * s.scale AND abs(f.q25 - e.q25) <= 0.0001 * s.scale AND abs(f.q30 - e.q30) <= 0.0001 * s.scale AND abs(f.q35 - e.q35) <= 0.0001 * s.scale AND abs(f.q40 - e.q40) <= 0.0001 * s.scale AND abs(f.q45 - e.q45) <= 0.0001 * s.scale AND abs(f.q50 - e.q50) <= 0.0001 * s.scale AND abs(f.q55 - e.q55) <= 0.0001 * s.scale AND abs(f.q60 - e.q60) <= 0.0001 * s.scale AND abs(f.q65 - e.q65) <= 0.0001 * s.scale AND abs(f.q70 - e.q70) <= 0.0001 * s.scale AND abs(f.q75 - e.q75) <= 0.0001 * s.scale AND abs(f.q80 - e.q80) <= 0.0001 * s.scale AND abs(f.q85 - e.q85) <= 0.0001 * s.scale AND abs(f.q90 - e.q90) <= 0.0001 * s.scale AND abs(f.q95 - e.q95) <= 0.0001 * s.scale AND abs(f.q99 - e.q99) <= 0.0001 * s.scale AND f.forecast = f.q50)
-FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY ts) AS step FROM f) f
+FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY t) AS step FROM f) f
 JOIN e USING (series_id, step)
 JOIN s USING (series_id);
 ----

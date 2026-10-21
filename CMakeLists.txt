@@ -28,7 +28,7 @@ include_directories(src/include)
 
 set(EXTENSION_SOURCES
     src/timestral_extension.cpp src/forecast_aggregate.cpp
-    src/forecast_macro.cpp src/forecaster.cpp src/model_store.cpp
+    src/forecast_grammar.cpp src/forecaster.cpp src/model_store.cpp
     src/time_grid.cpp)
 # This file includes onnxruntime headers. Skip it when the tidy job has no ONNX
 # Runtime.
