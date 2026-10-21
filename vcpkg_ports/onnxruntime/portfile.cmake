@@ -99,6 +99,25 @@ if("tensorrt" IN_LIST FEATURES)
     endif()
 endif()
 
+# --- timestral overlay: KleidiAI on arm64 ------------------------------------
+# Upstream build.py enables KleidiAI (Arm's SME/NEON GEMM kernels in MLAS) on arm64, but the CMake option
+# defaults to OFF. On Apple M4 it makes Timestral's float GEMMs ~3x faster per thread. ORT pulls KleidiAI with
+# FetchContent, which vcpkg runs disconnected, so the pinned release (cmake/deps.txt of ORT 1.29.0) is fetched
+# here and handed over as the FetchContent source. vcpkg's own kleidiai port (1.8.0) is too old for ORT 1.29.
+if(VCPKG_TARGET_ARCHITECTURE STREQUAL "arm64")
+    vcpkg_from_github(
+        OUT_SOURCE_PATH KLEIDIAI_SOURCE_PATH
+        REPO ARM-software/kleidiai
+        REF v1.20.0
+        SHA512 5a0ee693c98f43f2cd9278b5bfba855510778804502481a2510f9138d44195016d28d6c0d17e1ccc9affef51e0480e6bda182f7a44c73508def5da2d561f94ae
+    )
+    list(APPEND FEATURE_OPTIONS
+        -Donnxruntime_USE_KLEIDIAI=ON
+        "-DFETCHCONTENT_SOURCE_DIR_KLEIDIAI=${KLEIDIAI_SOURCE_PATH}"
+    )
+endif()
+# --- end timestral overlay ---------------------------------------------------
+
 string(COMPARE EQUAL "${VCPKG_LIBRARY_LINKAGE}" "dynamic" BUILD_SHARED)
 
 # see tools/ci_build/build.py

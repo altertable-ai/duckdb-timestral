@@ -91,10 +91,10 @@ FROM timestral_forecast_by('sales', 'store', 'ts', 'amount', 12, options := {'fr
 
 | Size | File | GIFT-Eval MASE ↓ | GIFT-Eval CRPS ↓ | 1,000 series, 2,016 steps of context → 96 steps* |
 |---|---|---|---|---|
-| `5m` (default) | 23 MB | 0.705 | 0.479 | 1.9 s |
-| `28m` | 114 MB | 0.678 | 0.461 | 8.5 s |
-| `123m` | 495 MB | 0.659 | 0.448 | 37 s |
-| `209m` | 842 MB | 0.658 | 0.446 | 71 s |
+| `5m` (default) | 23 MB | 0.705 | 0.479 | 0.9 s |
+| `28m` | 114 MB | 0.678 | 0.461 | 3.3 s |
+| `123m` | 495 MB | 0.659 | 0.448 | 14 s |
+| `209m` | 842 MB | 0.658 | 0.446 | 25 s |
 
 \* Apple M4 Pro, 14 threads. The accuracy figures are Mistral's published GIFT-Eval results.
 
