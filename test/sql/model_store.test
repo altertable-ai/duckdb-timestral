@@ -15,7 +15,7 @@ SELECT list(size ORDER BY file_bytes) FROM timestral_models();
 [5m, 28m, 123m, 209m]
 
 statement ok
-SET timestral_cache_dir = '__TEST_DIR__';
+SET timestral_cache_dir = '{TEST_DIR}';
 
 query II
 SELECT size, cached FROM timestral_models() WHERE size = '5m';
@@ -24,7 +24,7 @@ SELECT size, cached FROM timestral_models() WHERE size = '5m';
 
 # a leftover partial download is never treated as a cached model
 statement ok
-COPY (SELECT 'x') TO '__TEST_DIR__/timestral-5m.onnx.tmp' (FORMAT csv);
+COPY (SELECT 'x') TO '{TEST_DIR}/timestral-5m.onnx.tmp' (FORMAT csv);
 
 query I
 SELECT cached FROM timestral_models() WHERE size = '5m';

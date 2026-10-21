@@ -60,7 +60,7 @@ static int64_t TimeOfDay(int64_t micros) {
 	date_t date;
 	dtime_t time;
 	Timestamp::Convert(timestamp_t(micros), date, time);
-	return time.micros;
+	return time.value;
 }
 
 //! Day `min(anchor_day, days in month)` of the month `month_index`, at `time_of_day`.

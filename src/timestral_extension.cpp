@@ -3,6 +3,7 @@
 #include "timestral_extension.hpp"
 
 #include "duckdb.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 #include "duckdb/function/scalar_function.hpp"
 
 #include "timestral/forecast_aggregate.hpp"
@@ -15,8 +16,8 @@ static void TimestralVersionFun(DataChunk &args, ExpressionState &state, Vector 
 	auto &children = StructVector::GetEntries(result);
 	TimestralExtension extension;
 	auto extension_version = extension.Version();
-	children[0]->SetValue(0, Value(extension_version.empty() ? "dev" : extension_version));
-	children[1]->SetValue(0, Value(timestral::OrtBlockPredictor::RuntimeVersion()));
+	children[0].SetValue(0, Value(extension_version.empty() ? "dev" : extension_version));
+	children[1].SetValue(0, Value(timestral::OrtBlockPredictor::RuntimeVersion()));
 	result.SetVectorType(VectorType::CONSTANT_VECTOR);
 }
 

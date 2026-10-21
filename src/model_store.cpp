@@ -21,7 +21,7 @@ static constexpr idx_t DOWNLOAD_CHUNK = 8 * 1024 * 1024;
 
 string GetStringSetting(ClientContext &context, const string &name) {
 	Value value;
-	if (!context.TryGetCurrentSetting(name, value) || value.IsNull()) {
+	if (!context.TryGetCurrentSetting(Identifier(name), value) || value.IsNull()) {
 		return string();
 	}
 	return value.ToString();
@@ -215,7 +215,7 @@ struct ModelsGlobalState : public GlobalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> ModelsBind(ClientContext &context, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names) {
+                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
 	names = {"size", "file_name", "url", "sha256", "file_bytes", "cached", "local_path"};
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
 	                LogicalType::UBIGINT, LogicalType::BOOLEAN, LogicalType::VARCHAR};
@@ -232,16 +232,15 @@ static void ModelsFunction(ClientContext &context, TableFunctionInput &data, Dat
 	constexpr idx_t total = sizeof(MODEL_MANIFEST) / sizeof(MODEL_MANIFEST[0]);
 	while (state.offset < total && count < STANDARD_VECTOR_SIZE) {
 		auto &entry = MODEL_MANIFEST[state.offset++];
-		output.SetValue(0, count, Value(entry.size));
-		output.SetValue(1, count, Value(entry.file_name));
-		output.SetValue(2, count, Value(ModelStore::ModelUrl(context, entry)));
-		output.SetValue(3, count, Value(entry.sha256));
-		output.SetValue(4, count, Value::UBIGINT(entry.file_bytes));
-		output.SetValue(5, count, Value::BOOLEAN(ModelStore::IsCached(context, entry)));
-		output.SetValue(6, count, Value(ModelStore::CachePath(context, entry)));
+		output.data[0].Append(Value(entry.size));
+		output.data[1].Append(Value(entry.file_name));
+		output.data[2].Append(Value(ModelStore::ModelUrl(context, entry)));
+		output.data[3].Append(Value(entry.sha256));
+		output.data[4].Append(Value::UBIGINT(entry.file_bytes));
+		output.data[5].Append(Value::BOOLEAN(ModelStore::IsCached(context, entry)));
+		output.data[6].Append(Value(ModelStore::CachePath(context, entry)));
 		count++;
 	}
-	output.SetCardinality(count);
 }
 
 void RegisterModelStore(ExtensionLoader &loader) {

@@ -5,12 +5,12 @@
 require timestral
 
 statement ok
-SET timestral_cache_dir = '__TEST_DIR__';
+SET timestral_cache_dir = '{TEST_DIR}';
 
 # same name and size as the real file, wrong content (csv adds the trailing newline)
 statement ok
 COPY (SELECT repeat('x', (SELECT file_bytes - 1 FROM timestral_models() WHERE size = '5m')::BIGINT))
-TO '__TEST_DIR__/timestral-5m.onnx' (FORMAT csv, HEADER false, QUOTE '');
+TO '{TEST_DIR}/timestral-5m.onnx' (FORMAT csv, HEADER false, QUOTE '');
 
 query I
 SELECT cached FROM timestral_models() WHERE size = '5m';
