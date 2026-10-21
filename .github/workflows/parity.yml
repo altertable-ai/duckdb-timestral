@@ -1,0 +1,61 @@
+#
+# Builds the extension on Linux and checks timestral_forecast against Mistral's PyTorch reference forecasts
+# (test/data/parity) using the published 5M model. The distribution pipeline skips these tests because they
+# need the model file.
+#
+name: Parity
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  parity:
+    name: Parity with the PyTorch reference (5M)
+    runs-on: ubuntu-latest
+    env:
+      VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+      VCPKG_TARGET_TRIPLET: x64-linux-release
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/vcpkg-cache,readwrite
+      GEN: ninja
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
+
+      - name: Install build tools
+        run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build
+
+      # ONNX Runtime takes a long time to build from source; keep vcpkg's binary packages between runs.
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: vcpkg-cache
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'vcpkg_ports/**', 'toolchains/**') }}
+
+      - name: Create the vcpkg cache directory
+        run: mkdir -p vcpkg-cache
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11.1
+        with:
+          vcpkgGitCommitId: 84bab45d415d22042bd0b9081aea57f362da3f35
+
+      - name: Build
+        run: make release
+
+      - name: Download the 5M model
+        run: |
+          mkdir -p models
+          curl --fail --retry 3 -L -o models/timestral-5m.onnx https://assets.altertable.ai/timestral/v1/timestral-5m.onnx
+          expected=$(grep -o '"5m", "timestral-5m.onnx", "[0-9a-f]*"' src/include/timestral/model_manifest.hpp | grep -o '[0-9a-f]\{64\}')
+          echo "${expected}  models/timestral-5m.onnx" | sha256sum --check
+
+      - name: Test
+        run: TIMESTRAL_MODEL_PATH=$PWD/models/timestral-5m.onnx make test

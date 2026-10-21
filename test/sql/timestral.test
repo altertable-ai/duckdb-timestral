@@ -1,0 +1,10 @@
+# name: test/sql/timestral.test
+# description: the extension loads and links ONNX Runtime
+# group: [sql]
+
+require timestral
+
+query I
+SELECT timestral_version().onnxruntime LIKE '1.%';
+----
+true

@@ -1,0 +1,51 @@
+# name: test/sql/model_store.test
+# description: model manifest, cache status and settings validation (no model needed)
+# group: [sql]
+
+require timestral
+
+query II
+SELECT count(*), bool_and(url = 'https://assets.altertable.ai/timestral/v1/timestral-' || size || '.onnx') FROM timestral_models();
+----
+4	true
+
+query I
+SELECT list(size ORDER BY file_bytes) FROM timestral_models();
+----
+[5m, 28m, 123m, 209m]
+
+statement ok
+SET timestral_cache_dir = '__TEST_DIR__';
+
+query II
+SELECT size, cached FROM timestral_models() WHERE size = '5m';
+----
+5m	false
+
+# a leftover partial download is never treated as a cached model
+statement ok
+COPY (SELECT 'x') TO '__TEST_DIR__/timestral-5m.onnx.tmp' (FORMAT csv);
+
+query I
+SELECT cached FROM timestral_models() WHERE size = '5m';
+----
+false
+
+statement error
+SET timestral_model = '7m';
+----
+Invalid Input Error: timestral: unknown model size '7m'
+
+statement ok
+SET timestral_model = '28M';
+
+query I
+SELECT current_setting('timestral_model');
+----
+28M
+
+# parallelism comes from DuckDB's own scheduler (SET threads); there is no separate timestral thread setting
+statement error
+SET timestral_threads = 2;
+----
+<REGEX>:Catalog Error: unrecognized configuration parameter "timestral_threads".*

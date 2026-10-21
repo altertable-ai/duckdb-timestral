@@ -1,0 +1,150 @@
+# name: test/sql/forecast_time.test
+# description: timestral_forecast with TIMESTAMP, TIMESTAMPTZ and DATE timestamps, freq and options
+# group: [sql]
+
+require timestral
+
+require-env TIMESTRAL_MODEL_PATH
+
+statement ok
+SET timestral_model_path = '${TIMESTRAL_MODEL_PATH}';
+
+# hourly TIMESTAMP data: inferred step 1 hour, forecast continues after the last row
+query I
+SELECT list(ts) FROM (SELECT unnest(timestral_forecast(ts, v, 3), recursive := true)
+  FROM (SELECT TIMESTAMP '2026-01-01' + INTERVAL (i) HOUR AS ts, sin(i / 5) AS v FROM range(200) r(i)));
+----
+['2026-01-09 08:00:00', '2026-01-09 09:00:00', '2026-01-09 10:00:00']
+
+# DATE data keeps the DATE type
+query II
+SELECT typeof(f[1].ts), f[1].ts FROM (SELECT timestral_forecast(d, v, 2) AS f
+  FROM (SELECT DATE '2026-01-01' + i::INTEGER AS d, cos(i / 7) AS v FROM range(100) r(i)));
+----
+DATE	2026-04-11
+
+statement ok
+CREATE TABLE monthly AS SELECT (DATE '2023-01-01' + INTERVAL (i) MONTH)::DATE AS d, 10 + (i % 12) AS v FROM range(36) r(i);
+
+# calendar frequencies are not inferred from fixed gaps
+statement error
+SELECT timestral_forecast(d, v, 3) FROM monthly;
+----
+<REGEX>:.*Invalid Input Error: timestral: timestamp .* is not on the series grid \(step 31 days\).*\{'freq': INTERVAL '1 month'\}.*
+
+query I
+SELECT list(ts) FROM (SELECT unnest(timestral_forecast(d, v, 3, {'freq': INTERVAL '1 month'}), recursive := true) FROM monthly);
+----
+[2026-01-01, 2026-02-01, 2026-03-01]
+
+# month-end data: grid points are computed from the last point, never accumulated
+query I
+SELECT list(ts) FROM (SELECT unnest(timestral_forecast(d, v, 3, {'freq': INTERVAL '1 month'}), recursive := true)
+  FROM (SELECT last_day(DATE '2025-01-01' + INTERVAL (i) MONTH) AS d, i::DOUBLE AS v FROM range(12) r(i)));
+----
+[2026-01-31, 2026-02-28, 2026-03-31]
+
+# a 1-month freq also works on TIMESTAMP and keeps the time of day
+query I
+SELECT f[1].ts FROM (SELECT timestral_forecast(d + TIME '06:30', v, 1, {'freq': INTERVAL '1 month'}) AS f FROM monthly);
+----
+2026-01-01 06:30:00
+
+statement ok
+SELECT timestral_forecast(d, v, 3, {'freq': INTERVAL '1 month', 'model': '5m'}) FROM monthly;
+
+statement error
+SELECT timestral_forecast(d, v, 3, {'model': 'x'}) FROM monthly;
+----
+Invalid Input Error: timestral: unknown model size 'x'
+
+statement error
+SELECT timestral_forecast(d, v, 3, {'freq': INTERVAL '1 month 2 days'}) FROM monthly;
+----
+Binder Error: timestral: freq must be either a fixed duration or a whole number of months
+
+statement error
+SELECT timestral_forecast(d, v, 3, {'frequency': INTERVAL '1 month'}) FROM monthly;
+----
+Binder Error: timestral: unknown option 'frequency' (valid options: model, freq)
+
+statement error
+SELECT timestral_forecast(d, v, 3, {'freq': INTERVAL '1 hour'}) FROM monthly;
+----
+Binder Error: timestral: freq for DATE values must be a whole number of days or months
+
+statement error
+SELECT timestral_forecast(i, i::DOUBLE, 3, {'freq': INTERVAL '1 day'}) FROM range(10) r(i);
+----
+Binder Error: timestral: freq for integer time steps must be an integer
+
+statement error
+SELECT timestral_forecast(d, v, 3, {'freq': 5}) FROM monthly;
+----
+Binder Error: timestral: freq for DATE values must be an INTERVAL
+
+statement error
+SELECT timestral_forecast(d, v, 3, 'monthly') FROM monthly;
+----
+Binder Error: timestral: options must be a constant STRUCT
+
+# integer time steps with an explicit step: gaps become missing values
+query I
+SELECT list(ts) FROM (SELECT unnest(timestral_forecast(i * 10, i::DOUBLE, 2, {'freq': 5}), recursive := true) FROM range(50) r(i));
+----
+[495, 500]
+
+# a gap of missing rows forecasts exactly like explicit NULL rows
+query I
+SELECT a = b FROM
+  (SELECT timestral_forecast(ts, v, 6) AS a FROM (SELECT TIMESTAMP '2026-01-01' + INTERVAL (i) HOUR AS ts, sin(i / 5) AS v FROM range(300) r(i) WHERE i NOT IN (100, 101, 102))),
+  (SELECT timestral_forecast(ts, CASE WHEN i IN (100, 101, 102) THEN NULL ELSE v END, 6) AS b FROM (SELECT i, TIMESTAMP '2026-01-01' + INTERVAL (i) HOUR AS ts, sin(i / 5) AS v FROM range(300) r(i)));
+----
+true
+
+# a row decades before the rest does not build a giant grid; only the last 32,768 steps are used
+query II
+SELECT f IS NOT NULL, len(f) FROM (SELECT timestral_forecast(ts, v, 4) AS f FROM (
+  SELECT TIMESTAMP '1970-01-01' AS ts, 1.0 AS v
+  UNION ALL SELECT TIMESTAMP '2026-10-20' + INTERVAL (i) SECOND, sin(i / 9) FROM range(500) r(i)));
+----
+true	4
+
+# TIMESTAMPTZ values are UTC instants: local-midnight data across a DST change is off a 1-day grid
+statement error
+SELECT timestral_forecast(ts, v, 2) FROM (
+  SELECT ('2026-10-' || lpad((14 + i)::VARCHAR, 2, '0') || CASE WHEN i < 11 THEN ' 22:00:00+00' ELSE ' 23:00:00+00' END)::TIMESTAMPTZ AS ts, i::DOUBLE AS v
+  FROM range(15) r(i));
+----
+<REGEX>:.*not on the series grid.*TIMESTAMPTZ values are UTC instants.*cast to TIMESTAMP.*time_bucket.*
+
+query I
+SELECT typeof(timestral_forecast(ts, v, 1)[1].ts) FROM (SELECT ((TIMESTAMP '2026-01-01' + INTERVAL (i) HOUR)::VARCHAR || '+00')::TIMESTAMPTZ AS ts, i::DOUBLE AS v FROM range(50) r(i));
+----
+TIMESTAMP WITH TIME ZONE
+
+# month-end series stay on month ends whatever the length of the last month
+query I
+SELECT list(ts) FROM (SELECT unnest(timestral_forecast(d, v, 3, {'freq': INTERVAL '1 month'}), recursive := true)
+  FROM (SELECT last_day(DATE '2025-01-01' + INTERVAL (i) MONTH) AS d, i::DOUBLE AS v FROM range(11) r(i)));
+----
+[2025-12-31, 2026-01-31, 2026-02-28]
+
+query I
+SELECT list(ts) FROM (SELECT unnest(timestral_forecast(d, v, 2, {'freq': INTERVAL '1 month'}), recursive := true)
+  FROM (SELECT last_day(DATE '2024-03-01' + INTERVAL (i) MONTH) AS d, i::DOUBLE AS v FROM range(12) r(i)));
+----
+[2025-03-31, 2025-04-30]
+
+# quarterly month-end data ending in a 30-day month
+query I
+SELECT list(ts) FROM (SELECT unnest(timestral_forecast(d, v, 2, {'freq': INTERVAL '3 months'}), recursive := true)
+  FROM (SELECT last_day(DATE '2023-03-01' + INTERVAL (3 * i) MONTH) AS d, i::DOUBLE AS v FROM range(11) r(i)));
+----
+[2025-12-31, 2026-03-31]
+
+# with an explicit freq the off-grid error does not tell the user to pass a freq
+statement error
+SELECT timestral_forecast(d, v, 3, {'freq': INTERVAL '1 month'}) FROM (SELECT * FROM monthly UNION ALL SELECT DATE '2026-01-15', 1);
+----
+<REGEX>:.*is not on the series grid \(step 1 month\); use time_bucket to align the timestamps.*

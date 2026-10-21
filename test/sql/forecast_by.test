@@ -1,0 +1,35 @@
+# name: test/sql/forecast_by.test
+# description: timestral_forecast_by returns one row per (group, step)
+# group: [sql]
+
+require timestral
+
+require-env TIMESTRAL_MODEL_PATH
+
+statement ok
+SET timestral_model_path = '${TIMESTRAL_MODEL_PATH}';
+
+statement ok
+CREATE TABLE sales AS
+SELECT g AS store, g * 1000 + 7 AS store_id, TIMESTAMP '2026-01-01' + INTERVAL (i) HOUR AS ts, 10 * g + sin(i / 6) AS amount
+FROM range(3) a(g), range(200) b(i);
+
+# same rows as the hand-written GROUP BY + unnest; 'store' does not also pick up 'store_id'
+query I
+SELECT count(*) = 3 * 5 AND bool_and(a.forecast = b.forecast AND a.q99 = b.q99) FROM
+  timestral_forecast_by('sales', 'store', 'ts', 'amount', 5) a
+  JOIN (SELECT store, unnest(timestral_forecast(ts, amount, 5), recursive := true) FROM sales GROUP BY store) b
+  USING (store, ts);
+----
+true
+
+query I
+SELECT list(column_name ORDER BY ordinal) FROM (
+  SELECT column_name, row_number() OVER () AS ordinal FROM (DESCRIBE FROM timestral_forecast_by('sales', 'store', 'ts', 'amount', 2)));
+----
+[store, ts, forecast, q01, q05, q10, q15, q20, q25, q30, q35, q40, q45, q50, q55, q60, q65, q70, q75, q80, q85, q90, q95, q99]
+
+query II
+SELECT count(*), min(ts) FROM timestral_forecast_by('sales', 'store', 'ts', 'amount', 2, options := {'freq': INTERVAL '30 minutes'});
+----
+6	2026-01-09 07:30:00

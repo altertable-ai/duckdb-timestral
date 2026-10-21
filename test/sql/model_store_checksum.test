@@ -1,0 +1,28 @@
+# name: test/sql/model_store_checksum.test
+# description: a cached model file whose content does not match the manifest is rejected and removed
+# group: [sql]
+
+require timestral
+
+statement ok
+SET timestral_cache_dir = '__TEST_DIR__';
+
+# same name and size as the real file, wrong content (csv adds the trailing newline)
+statement ok
+COPY (SELECT repeat('x', (SELECT file_bytes - 1 FROM timestral_models() WHERE size = '5m')::BIGINT))
+TO '__TEST_DIR__/timestral-5m.onnx' (FORMAT csv, HEADER false, QUOTE '');
+
+query I
+SELECT cached FROM timestral_models() WHERE size = '5m';
+----
+true
+
+statement error
+SELECT timestral_forecast(i, i::DOUBLE, 2) FROM range(10) r(i);
+----
+IO Error: timestral: checksum mismatch for timestral-5m.onnx
+
+query I
+SELECT cached FROM timestral_models() WHERE size = '5m';
+----
+false

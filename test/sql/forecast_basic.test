@@ -1,0 +1,115 @@
+# name: test/sql/forecast_basic.test
+# description: timestral_forecast SQL surface with integer time steps
+# group: [sql]
+
+require timestral
+
+require-env TIMESTRAL_MODEL_PATH
+
+statement ok
+SET timestral_model_path = '${TIMESTRAL_MODEL_PATH}';
+
+statement ok
+CREATE TABLE s AS SELECT i AS t, 100 + 10 * sin(i / 4) AS v FROM range(100) r(i);
+
+query I
+SELECT typeof(timestral_forecast(t, v, 2)) FROM s;
+----
+STRUCT(ts BIGINT, forecast DOUBLE, q01 DOUBLE, q05 DOUBLE, q10 DOUBLE, q15 DOUBLE, q20 DOUBLE, q25 DOUBLE, q30 DOUBLE, q35 DOUBLE, q40 DOUBLE, q45 DOUBLE, q50 DOUBLE, q55 DOUBLE, q60 DOUBLE, q65 DOUBLE, q70 DOUBLE, q75 DOUBLE, q80 DOUBLE, q85 DOUBLE, q90 DOUBLE, q95 DOUBLE, q99 DOUBLE)[]
+
+# the forecast starts after the last row, quantiles are sorted, forecast is the median
+query IIII
+SELECT list(ts), bool_and(q01 <= q50 AND q50 <= q99), bool_and(forecast = q50), count(*)
+FROM (SELECT unnest(timestral_forecast(t, v, 5), recursive := true) FROM s);
+----
+[100, 101, 102, 103, 104]	true	true	5
+
+# INTEGER time steps keep their type
+query I
+SELECT typeof(timestral_forecast(t::INTEGER, v, 1)[1].ts) FROM s;
+----
+INTEGER
+
+# step inferred from the most common gap
+query I
+SELECT list(ts) FROM (SELECT unnest(timestral_forecast(t * 2, v, 3), recursive := true) FROM s);
+----
+[200, 202, 204]
+
+# trailing NULL rows stay in the context: the forecast starts after the last row, not the last value
+query I
+SELECT list(ts) FROM (SELECT unnest(timestral_forecast(t, CASE WHEN t >= 97 THEN NULL ELSE v END, 2), recursive := true) FROM s);
+----
+[100, 101]
+
+statement error
+SELECT timestral_forecast(t, v, 0) FROM s;
+----
+Binder Error: timestral: horizon must be between 1 and 100000
+
+statement error
+SELECT timestral_forecast(t, v, 100001) FROM s;
+----
+Binder Error: timestral: horizon must be between 1 and 100000
+
+statement error
+SELECT timestral_forecast(t, v, t::INTEGER) FROM s;
+----
+Binder Error: timestral: horizon must be a constant
+
+# a series without observed values, or with a single row, yields NULL
+query II
+SELECT timestral_forecast(t, NULL::DOUBLE, 3) IS NULL, timestral_forecast(t, v, 3) FILTER (WHERE t = 0) IS NULL FROM s;
+----
+true	true
+
+statement error
+SELECT timestral_forecast(t % 50, v, 3) FROM s;
+----
+Invalid Input Error: timestral: duplicate timestamp 0 in one series; aggregate first, e.g. with time_bucket
+
+statement error
+SELECT timestral_forecast(CASE WHEN t = 50 THEN 101 ELSE t * 2 END, v, 3) FROM s;
+----
+Invalid Input Error: timestral: timestamp 101 is not on the series grid (step 2); pass freq or use time_bucket
+
+# non-finite values are missing values, exactly like NULL
+query I
+SELECT a = b FROM
+  (SELECT timestral_forecast(t, CASE WHEN t IN (10, 20) THEN NULL WHEN t = 30 THEN NULL ELSE v END, 8) AS a FROM s),
+  (SELECT timestral_forecast(t, CASE WHEN t = 10 THEN 'inf'::DOUBLE WHEN t = 20 THEN '-inf'::DOUBLE WHEN t = 30 THEN 'nan'::DOUBLE ELSE v END, 8) AS b FROM s);
+----
+true
+
+# many groups in parallel share one model session
+statement ok
+SET threads = 8;
+
+query II
+SELECT count(*), count(f) FROM (
+  SELECT g, timestral_forecast(i, (g % 7) + sin(i / 3.0), 4) AS f FROM range(2000) a(g), range(100) b(i) GROUP BY g);
+----
+2000	2000
+
+# forecasts are identical whatever the parallelism, and errors raised while forecasting in parallel surface
+statement ok
+CREATE TABLE many AS SELECT g, i AS t, (g % 13) + sin(i / (2 + g % 5)) AS v FROM range(300) a(g), range(150) b(i);
+
+statement ok
+SET threads = 1;
+
+statement ok
+CREATE TABLE serial AS SELECT g, timestral_forecast(t, v, 40) AS f FROM many GROUP BY g;
+
+statement ok
+SET threads = 8;
+
+query I
+SELECT count(*) = 300 AND bool_and(s.f = p.f) FROM serial s JOIN (SELECT g, timestral_forecast(t, v, 40) AS f FROM many GROUP BY g) p USING (g);
+----
+true
+
+statement error
+SELECT g, timestral_forecast(CASE WHEN g = 123 AND t = 7 THEN 8 ELSE t END, v, 4) FROM many GROUP BY g;
+----
+Invalid Input Error: timestral: duplicate timestamp 8 in one series
