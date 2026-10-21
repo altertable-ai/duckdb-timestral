@@ -5,8 +5,15 @@ DuckDB. A forecast is a SQL query: there is no training step, no Python and no G
 a statically linked [ONNX Runtime](https://onnxruntime.ai/), and every forecast comes with 21 quantiles.
 
 ```sql
+INSTALL timestral FROM community;
 LOAD timestral;
 
+-- 500 hourly rows for each of 3 stores.
+CREATE TABLE sales AS
+SELECT g AS store, TIMESTAMP '2026-01-01' + INTERVAL (i) HOUR AS ts, 10 * g + sin(i / 6) AS amount
+FROM range(3) a(g), range(500) b(i);
+
+-- Forecast the next 24 hours of every store.
 SELECT store, ts, forecast, q10, q90
 FROM timestral_forecast_by('sales', 'store', 'ts', 'amount', 24);
 ```
@@ -17,8 +24,6 @@ FROM timestral_forecast_by('sales', 'store', 'ts', 'amount', 24);
 | 1     | 2026-01-21 21:00:00 | 10.96    | 10.94 | 10.99 |
 | …     | …                   | …        | …     | …     |
 
-(`sales` here holds 500 hourly rows per store; the hello-world in `description.yml` builds it.)
-
 > **Model licence.** This extension is MIT licensed, but the Timestral weights it downloads belong to Mistral AI
 > and are released under Mistral's [Modified MIT licence](https://huggingface.co/mistralai/Timestral-5M/blob/main/LICENSE).
 > That licence **grants no rights to a company whose consolidated monthly revenue (or its employer's) exceeds
@@ -27,14 +32,15 @@ FROM timestral_forecast_by('sales', 'store', 'ts', 'amount', 24);
 
 ## Install
 
-Until it is published as a DuckDB community extension, build it from source (see [Building](#building)) and load
-the resulting `build/release/extension/timestral/timestral.duckdb_extension`:
+`timestral` is a [DuckDB community extension](https://duckdb.org/community_extensions/extensions/timestral):
 
 ```sql
-LOAD 'build/release/extension/timestral/timestral.duckdb_extension';
+INSTALL timestral FROM community;
+LOAD timestral;
 ```
 
-Once published, it will install with `INSTALL timestral FROM community; LOAD timestral;`.
+Binaries are built for Linux (x86_64 and arm64), macOS (arm64 and x86_64) and Windows (x86_64). To build it
+yourself, see [Building](#building).
 
 On first use the extension downloads the selected model from `https://assets.altertable.ai/timestral/v1/`,
 checks its SHA-256, and caches it in `~/.duckdb/timestral/v1/`.
@@ -139,7 +145,8 @@ largest difference is 1.1e-6 of the series scale.
 
 - No covariates (past-only, known-future, categorical) and no joint multivariate forecasting yet. The model
   supports both, so they are a natural next step.
-- Not available for DuckDB-WASM, Windows MinGW or Linux musl builds, because ONNX Runtime does not support them.
+- Not available for DuckDB-WASM, which ONNX Runtime's native build does not target. Windows MinGW and Linux musl
+  builds are not set up yet.
 - `TIMESTAMPTZ` values are treated as UTC instants. Daily data at local midnight shifts by an hour across daylight
   saving changes and falls off the grid. Cast to `TIMESTAMP` in the local time zone first.
 - The model is loaded, and downloaded if needed, when the query is planned. `EXPLAIN` therefore triggers the
@@ -178,6 +185,12 @@ TIMESTRAL_MODEL_DIR=$PWD/scripts/export/out make test
 ```
 
 The second command also runs the parity tests for the 28M, 123M and 209M models.
+
+A local build is unsigned. To load it, start a DuckDB of the same version with `duckdb -unsigned`, then:
+
+```sql
+LOAD 'build/release/extension/timestral/timestral.duckdb_extension';
+```
 
 ## Licences
 
