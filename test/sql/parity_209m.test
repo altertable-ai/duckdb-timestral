@@ -11,7 +11,7 @@ require timestral
 require-env TIMESTRAL_MODEL_DIR
 
 statement ok
-SET timestral_model_path = '${TIMESTRAL_MODEL_DIR}/timestral-209m.onnx';
+SET timestral_model_path = '{TIMESTRAL_MODEL_DIR}/timestral-209m.onnx';
 
 query I
 WITH f AS (

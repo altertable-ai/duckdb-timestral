@@ -9,6 +9,8 @@
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/timestamp.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/function/aggregate_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -93,7 +95,7 @@ static int64_t ReadTimestamp(const UnifiedVectorFormat &format, const LogicalTyp
 		return UnifiedVectorFormat::GetData<int64_t>(format)[idx];
 	case LogicalTypeId::DATE: {
 		auto date = UnifiedVectorFormat::GetData<date_t>(format)[idx];
-		if (!Date::IsFinite(date)) {
+		if (!date.IsFinite()) {
 			throw InvalidInputException("timestral: infinite dates are not supported");
 		}
 		return Timestamp::FromDatetime(date, dtime_t(0)).value;
@@ -101,7 +103,7 @@ static int64_t ReadTimestamp(const UnifiedVectorFormat &format, const LogicalTyp
 	case LogicalTypeId::TIMESTAMP:
 	case LogicalTypeId::TIMESTAMP_TZ: {
 		auto ts = UnifiedVectorFormat::GetData<timestamp_t>(format)[idx];
-		if (!Timestamp::IsFinite(ts)) {
+		if (!ts.IsFinite()) {
 			throw InvalidInputException("timestral: infinite timestamps are not supported");
 		}
 		return ts.value;
@@ -150,21 +152,23 @@ static string OffGridHint(const LogicalType &type, bool explicit_step) {
 //===--------------------------------------------------------------------===//
 // Aggregate callbacks
 //===--------------------------------------------------------------------===//
-static idx_t ForecastStateSize(const AggregateFunction &) {
+static idx_t ForecastStateSize(AggregateStateInput &) {
 	return sizeof(ForecastState);
 }
 
-static void ForecastInitialize(const AggregateFunction &, data_ptr_t state) {
-	reinterpret_cast<ForecastState *>(state)->rows = nullptr;
+static void ForecastInitialize(AggregateStateInput &, data_ptr_t *states, idx_t count) {
+	for (idx_t i = 0; i < count; i++) {
+		reinterpret_cast<ForecastState *>(states[i])->rows = nullptr;
+	}
 }
 
 static void ForecastUpdate(Vector inputs[], AggregateInputData &aggr_input, idx_t input_count, Vector &states,
                            idx_t count) {
 	auto &bind = aggr_input.bind_data->Cast<ForecastBindData>();
 	UnifiedVectorFormat ts_format, value_format, state_format;
-	inputs[0].ToUnifiedFormat(count, ts_format);
-	inputs[1].ToUnifiedFormat(count, value_format);
-	states.ToUnifiedFormat(count, state_format);
+	inputs[0].ToUnifiedFormat(ts_format);
+	inputs[1].ToUnifiedFormat(value_format);
+	states.ToUnifiedFormat(state_format);
 	auto values = UnifiedVectorFormat::GetData<double>(value_format);
 	auto state_ptrs = UnifiedVectorFormat::GetData<ForecastState *>(state_format);
 	for (idx_t i = 0; i < count; i++) {
@@ -238,19 +242,19 @@ static void WriteForecast(const SeriesForecast &forecast, const ForecastBindData
 	const auto &config = DefaultModelConfig();
 	auto offset = ListVector::GetListSize(result);
 	ListVector::Reserve(result, offset + bind.horizon);
-	auto &entries = StructVector::GetEntries(ListVector::GetEntry(result));
+	auto &entries = StructVector::GetEntries(ListVector::GetChildMutable(result));
 	for (idx_t h = 0; h < bind.horizon; h++) {
 		auto row = offset + h;
 		auto ts = GridPoint(forecast.grid.last_point, forecast.grid.step, static_cast<int64_t>(h + 1));
-		entries[0]->SetValue(row, TimestampValue(bind.ts_type, ts));
+		entries[0].SetValue(row, TimestampValue(bind.ts_type, ts));
 		auto q = forecast.quantiles.data() + h * NUM_QUANTILES;
-		FlatVector::GetData<double>(*entries[1])[row] = q[config.median_index];
+		FlatVector::GetDataMutable<double>(entries[1])[row] = q[config.median_index];
 		for (idx_t k = 0; k < NUM_QUANTILES; k++) {
-			FlatVector::GetData<double>(*entries[2 + k])[row] = q[k];
+			FlatVector::GetDataMutable<double>(entries[2 + k])[row] = q[k];
 		}
 	}
 	ListVector::SetListSize(result, offset + bind.horizon);
-	FlatVector::GetData<list_entry_t>(result)[result_idx] = list_entry_t(offset, bind.horizon);
+	FlatVector::GetDataMutable<list_entry_t>(result)[result_idx] = list_entry_t(offset, bind.horizon);
 }
 
 //! Forecasts one series as a DuckDB task.
@@ -277,7 +281,7 @@ private:
 //! Forecasts `states[0..count)` and writes them in order. DuckDB often finalizes all groups of a small hash table
 //! from one thread, so every series is scheduled as a task on DuckDB's own scheduler: they run on its worker
 //! threads (as many as `SET threads`), with this thread helping.
-static void FinalizeStates(ForecastState **states, idx_t count, const ForecastBindData &bind, Vector &result,
+static void FinalizeStates(ForecastState *const *states, idx_t count, const ForecastBindData &bind, Vector &result,
                            idx_t offset) {
 	auto db = bind.db.lock();
 	if (!db) {
@@ -301,7 +305,7 @@ static void FinalizeStates(ForecastState **states, idx_t count, const ForecastBi
 	}
 }
 
-static void ForecastFinalize(Vector &states, AggregateInputData &aggr_input, Vector &result, idx_t count,
+static void ForecastFinalize(Vector &states, AggregateFinalizeInputData &aggr_input, Vector &result, idx_t count,
                              idx_t offset) {
 	auto &bind = aggr_input.bind_data->Cast<ForecastBindData>();
 	if (states.GetVectorType() == VectorType::CONSTANT_VECTOR) {
@@ -360,10 +364,11 @@ static GridStep ParseFreq(const Value &freq, const LogicalType &ts_type) {
 	return step;
 }
 
-static unique_ptr<FunctionData> ForecastBind(ClientContext &context, AggregateFunction &function,
-                                             vector<unique_ptr<Expression>> &arguments) {
+static unique_ptr<FunctionData> ForecastBind(BindAggregateFunctionInput &input) {
+	auto &context = input.GetClientContext();
+	auto &arguments = input.GetArguments();
 	auto bind = make_uniq<ForecastBindData>();
-	bind->ts_type = arguments[0]->return_type;
+	bind->ts_type = arguments[0]->GetReturnType();
 	bind->db = context.db;
 	auto &horizon_expr = *arguments[2];
 	if (!horizon_expr.IsFoldable()) {
@@ -380,20 +385,17 @@ static unique_ptr<FunctionData> ForecastBind(ClientContext &context, AggregateFu
 	bind->horizon = static_cast<idx_t>(horizon_value);
 
 	auto model = GetStringSetting(context, "timestral_model");
-	if (arguments.size() > 3 && arguments[3]->return_type.id() == LogicalTypeId::SQLNULL) {
-		// NULL options (the default of timestral_forecast_by) mean no options.
-		Function::EraseArgument(function, arguments, 3);
-	}
-	if (arguments.size() > 3) {
+	// NULL options (the default of timestral_forecast_by) mean no options.
+	if (arguments.size() > 3 && arguments[3]->GetReturnType().id() != LogicalTypeId::SQLNULL) {
 		auto &options_expr = *arguments[3];
-		if (!options_expr.IsFoldable() || options_expr.return_type.id() != LogicalTypeId::STRUCT) {
+		if (!options_expr.IsFoldable() || options_expr.GetReturnType().id() != LogicalTypeId::STRUCT) {
 			throw BinderException("timestral: options must be a constant STRUCT, e.g. {'freq': INTERVAL '1 hour'}");
 		}
 		auto options = ExpressionExecutor::EvaluateScalar(context, options_expr);
 		auto &fields = StructType::GetChildTypes(options.type());
 		auto &values = StructValue::GetChildren(options);
 		for (idx_t i = 0; i < fields.size(); i++) {
-			auto key = StringUtil::Lower(fields[i].first);
+			auto key = StringUtil::Lower(fields[i].first.GetIdentifierName());
 			auto &value = values[i];
 			if (key == "model") {
 				if (!value.IsNull()) {
@@ -405,23 +407,21 @@ static unique_ptr<FunctionData> ForecastBind(ClientContext &context, AggregateFu
 					bind->has_step = true;
 				}
 			} else {
-				throw BinderException("timestral: unknown option '%s' (valid options: model, freq)", fields[i].first);
+				throw BinderException("timestral: unknown option '%s' (valid options: model, freq)",
+				                      fields[i].first.GetIdentifierName());
 			}
 		}
-		Function::EraseArgument(function, arguments, 3);
 	}
 	// The model is resolved (and downloaded if needed) at bind time, so a missing model fails the query early.
 	bind->model = model;
 	bind->predictor = ModelStore::Instance().GetPredictor(context, model);
-	Function::EraseArgument(function, arguments, 2);
-	function.return_type = ForecastEntryType(bind->ts_type);
+	input.GetBoundFunction().SetReturnType(ForecastEntryType(bind->ts_type));
 	return std::move(bind);
 }
 
-// Bind erases the constant horizon/options arguments, so plans are (de)serialized with the bind data instead of
-// being re-bound.
+// Plans are (de)serialized with the bind data instead of being re-bound, which would download the model again.
 static void ForecastSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data_p,
-                              const AggregateFunction &) {
+                              const BoundAggregateFunction &) {
 	auto &bind = bind_data_p->Cast<ForecastBindData>();
 	serializer.WriteProperty(100, "horizon", bind.horizon);
 	serializer.WriteProperty(101, "ts_type", bind.ts_type);
@@ -434,7 +434,7 @@ static void ForecastSerialize(Serializer &serializer, const optional_ptr<Functio
 	serializer.WriteProperty(108, "model", bind.model);
 }
 
-static unique_ptr<FunctionData> ForecastDeserialize(Deserializer &deserializer, AggregateFunction &function) {
+static unique_ptr<FunctionData> ForecastDeserialize(Deserializer &deserializer, BoundAggregateFunction &function) {
 	auto &context = deserializer.Get<ClientContext &>();
 	auto bind = make_uniq<ForecastBindData>();
 	bind->horizon = deserializer.ReadProperty<idx_t>(100, "horizon");
@@ -448,7 +448,7 @@ static unique_ptr<FunctionData> ForecastDeserialize(Deserializer &deserializer, 
 	bind->model = deserializer.ReadProperty<string>(108, "model");
 	bind->db = context.db;
 	bind->predictor = ModelStore::Instance().GetPredictor(context, bind->model);
-	function.return_type = ForecastEntryType(bind->ts_type);
+	function.SetReturnType(ForecastEntryType(bind->ts_type));
 	return std::move(bind);
 }
 

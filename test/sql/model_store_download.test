@@ -7,10 +7,10 @@ require timestral
 require-env TIMESTRAL_MODEL_DIR
 
 statement ok
-SET GLOBAL timestral_model_url = '${TIMESTRAL_MODEL_DIR}';
+SET GLOBAL timestral_model_url = '{TIMESTRAL_MODEL_DIR}';
 
 statement ok
-SET GLOBAL timestral_cache_dir = '__TEST_DIR__/download_cache';
+SET GLOBAL timestral_cache_dir = '{TEST_DIR}/download_cache';
 
 query I
 SELECT cached FROM timestral_models() WHERE size = '5m';
@@ -33,6 +33,6 @@ SELECT cached FROM timestral_models() WHERE size = '5m';
 true
 
 query I
-SELECT count(*) FROM glob('__TEST_DIR__/download_cache/*.tmp*');
+SELECT count(*) FROM glob('{TEST_DIR}/download_cache/*.tmp*');
 ----
 0
