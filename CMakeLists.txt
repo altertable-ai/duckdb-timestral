@@ -2,16 +2,21 @@ cmake_minimum_required(VERSION 3.5)
 
 set(TARGET_NAME timestral)
 
-# ONNX Runtime (CPU execution provider) from vcpkg, linked statically. See vcpkg_ports/README.md.
-# DuckDB's tidy configure is not a vcpkg build, so the package is optional there.
+# ONNX Runtime (CPU execution provider) from vcpkg, linked statically. See
+# vcpkg_ports/README.md. DuckDB's tidy configure is not a vcpkg build, so the
+# package is optional there.
 if(CLANG_TIDY)
   find_package(onnxruntime CONFIG QUIET)
 else()
   find_package(onnxruntime CONFIG REQUIRED)
 endif()
-# vcpkg installs the public headers under include/onnxruntime/; sources include them flat.
+# vcpkg installs the public headers under include/onnxruntime/; sources include
+# them flat.
 if(onnxruntime_FOUND)
-  find_path(TIMESTRAL_ORT_INCLUDE_DIR NAMES onnxruntime_cxx_api.h PATH_SUFFIXES onnxruntime REQUIRED)
+  find_path(
+    TIMESTRAL_ORT_INCLUDE_DIR
+    NAMES onnxruntime_cxx_api.h
+    PATH_SUFFIXES onnxruntime REQUIRED)
 endif()
 
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
@@ -22,13 +27,11 @@ project(${TARGET_NAME})
 include_directories(src/include)
 
 set(EXTENSION_SOURCES
-    src/timestral_extension.cpp
-    src/forecast_aggregate.cpp
-    src/forecast_macro.cpp
-    src/forecaster.cpp
-    src/model_store.cpp
+    src/timestral_extension.cpp src/forecast_aggregate.cpp
+    src/forecast_macro.cpp src/forecaster.cpp src/model_store.cpp
     src/time_grid.cpp)
-# This file includes onnxruntime headers. Skip it when the tidy job has no ONNX Runtime.
+# This file includes onnxruntime headers. Skip it when the tidy job has no ONNX
+# Runtime.
 if(onnxruntime_FOUND)
   list(APPEND EXTENSION_SOURCES src/ort_predictor.cpp)
 endif()
@@ -46,7 +49,8 @@ if(onnxruntime_FOUND)
     target_link_libraries(${_target} onnxruntime::onnxruntime)
   endforeach()
 endif()
-# SHA-256 comes from DuckDB's bundled mbedtls (as in httpfs); the static extension gets it through duckdb_static.
+# SHA-256 comes from DuckDB's bundled mbedtls (as in httpfs); the static
+# extension gets it through duckdb_static.
 target_link_libraries(${LOADABLE_EXTENSION_NAME} duckdb_mbedtls)
 
 install(
