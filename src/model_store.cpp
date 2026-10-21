@@ -34,12 +34,6 @@ ModelStore &ModelStore::Instance() {
 	return *store;
 }
 
-static_assert(sizeof(MODEL_MANIFEST) / sizeof(MODEL_MANIFEST[0]) <= 4, "ModelStore::entry_locks is too small");
-
-static idx_t ManifestIndex(const ModelManifestEntry &entry) {
-	return static_cast<idx_t>(&entry - MODEL_MANIFEST);
-}
-
 string ModelStore::NormalizeSize(const string &size) {
 	auto lower = StringUtil::Lower(size);
 	for (auto &entry : MODEL_MANIFEST) {
@@ -104,12 +98,6 @@ static string Sha256Hex(duckdb_mbedtls::MbedTlsWrapper::SHA256State &state) {
 }
 
 void ModelStore::VerifyCachedFile(FileSystem &fs, const string &path, const ModelManifestEntry &entry) {
-	{
-		lock_guard<mutex> guard(lock);
-		if (verified_paths.count(path)) {
-			return;
-		}
-	}
 	duckdb_mbedtls::MbedTlsWrapper::SHA256State sha;
 	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
 	auto buffer = make_unsafe_uniq_array<data_t>(DOWNLOAD_CHUNK);
@@ -128,8 +116,6 @@ void ModelStore::VerifyCachedFile(FileSystem &fs, const string &path, const Mode
 		                  "removed, run the query again to download it",
 		                  entry.file_name, entry.sha256, actual, path);
 	}
-	lock_guard<mutex> guard(lock);
-	verified_paths.insert(path);
 }
 
 void ModelStore::Download(ClientContext &context, const ModelManifestEntry &entry, const string &target) {
@@ -174,42 +160,42 @@ void ModelStore::Download(ClientContext &context, const ModelManifestEntry &entr
 		                  entry.file_name, entry.sha256, actual, url);
 	}
 	fs.MoveFile(tmp, target);
-	lock_guard<mutex> guard(lock);
-	verified_paths.insert(target);
-}
-
-string ModelStore::ResolvePath(ClientContext &context, const ModelManifestEntry &entry) {
-	auto &fs = FileSystem::GetFileSystem(context);
-	auto explicit_path = GetStringSetting(context, "timestral_model_path");
-	if (!explicit_path.empty()) {
-		explicit_path = fs.ExpandPath(explicit_path);
-		if (!fs.FileExists(explicit_path)) {
-			throw IOException("timestral: timestral_model_path '%s' does not exist", explicit_path);
-		}
-		return explicit_path;
-	}
-	auto path = CachePath(context, entry);
-	if (IsCached(context, entry)) {
-		VerifyCachedFile(fs, path, entry);
-		return path;
-	}
-	Download(context, entry, path);
-	return path;
 }
 
 shared_ptr<BlockPredictor> ModelStore::GetPredictor(ClientContext &context, const string &size) {
 	auto &entry = Manifest(NormalizeSize(size));
-	// One download/verification at a time per size; other sizes and cached models are not held up by it.
-	lock_guard<mutex> entry_guard(entry_locks[ManifestIndex(entry)]);
-	auto path = ResolvePath(context, entry);
-	lock_guard<mutex> guard(lock);
-	auto it = sessions.find(path);
-	if (it != sessions.end()) {
-		return it->second;
+	auto &fs = FileSystem::GetFileSystem(context);
+	auto explicit_path = GetStringSetting(context, "timestral_model_path");
+	auto path = explicit_path.empty() ? CachePath(context, entry) : fs.ExpandPath(explicit_path);
+	if (!fs.IsPathAbsolute(path)) {
+		path = fs.JoinPath(FileSystem::GetWorkingDirectory(), path);
 	}
-	auto predictor = make_shared_ptr<OrtBlockPredictor>(path);
-	sessions[path] = predictor;
-	return predictor;
+	shared_ptr<ModelRecord> model;
+	{
+		lock_guard<mutex> guard(lock);
+		auto &record = models[path];
+		if (!record) {
+			record = make_shared_ptr<ModelRecord>();
+		}
+		model = record;
+	}
+	lock_guard<mutex> guard(model->lock);
+	if (!explicit_path.empty()) {
+		if (!fs.FileExists(path)) {
+			throw IOException("timestral: timestral_model_path '%s' does not exist", path);
+		}
+	} else {
+		if (!IsCached(context, entry)) {
+			Download(context, entry, path);
+		} else if (!model->verified) {
+			VerifyCachedFile(fs, path, entry);
+		}
+		model->verified = true;
+	}
+	if (!model->predictor) {
+		model->predictor = make_shared_ptr<OrtBlockPredictor>(path);
+	}
+	return model->predictor;
 }
 
 //===--------------------------------------------------------------------===//

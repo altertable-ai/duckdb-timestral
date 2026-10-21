@@ -155,6 +155,7 @@ export VCPKG_TOOLCHAIN_PATH=$PWD/../vcpkg/scripts/buildsystems/vcpkg.cmake
 GEN=ninja make release
 ```
 
+The build requires C++17 or newer and uses the same standard for DuckDB and the extension.
 The first build compiles ONNX Runtime from source through vcpkg, which takes a while. The patched ports in
 `vcpkg_ports/` are explained in [`vcpkg_ports/README.md`](vcpkg_ports/README.md). The loadable extension is about
 34 MB (macOS arm64).

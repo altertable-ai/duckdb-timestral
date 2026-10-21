@@ -195,7 +195,8 @@ std::vector<float> BlockArDecode(BlockPredictor &predictor, Rows context, idx_t 
 	for (idx_t r = 0; r < context.rows; r++) {
 		group_ids[r] = static_cast<int64_t>(r);
 	}
-	std::vector<std::vector<float>> per_row(context.rows);
+	std::vector<float> out(context.rows * prediction_length * NUM_QUANTILES);
+	idx_t written = 0;
 	idx_t remaining = (prediction_length + ps - 1) / ps;
 	while (remaining > 0) {
 		idx_t block = std::min(config.block_size, remaining);
@@ -203,10 +204,12 @@ std::vector<float> BlockArDecode(BlockPredictor &predictor, Rows context, idx_t 
 		auto quantiles =
 		    predictor.PredictBlock(context.values, context.observed, group_ids, context.rows, context.length, block);
 		RefineBlock(quantiles, context, block, config);
+		auto take = std::min(block_len, prediction_length - written);
 		for (idx_t r = 0; r < context.rows; r++) {
-			auto begin = quantiles.begin() + static_cast<std::ptrdiff_t>(r * block_len * NUM_QUANTILES);
-			per_row[r].insert(per_row[r].end(), begin, begin + static_cast<std::ptrdiff_t>(block_len * NUM_QUANTILES));
+			std::copy_n(quantiles.data() + r * block_len * NUM_QUANTILES, take * NUM_QUANTILES,
+			            out.data() + (r * prediction_length + written) * NUM_QUANTILES);
 		}
+		written += take;
 		remaining -= block;
 		if (remaining == 0) {
 			break;
@@ -241,12 +244,6 @@ std::vector<float> BlockArDecode(BlockPredictor &predictor, Rows context, idx_t 
 			}
 		}
 		context = std::move(next);
-	}
-	std::vector<float> out(context.rows * prediction_length * NUM_QUANTILES);
-	for (idx_t r = 0; r < context.rows; r++) {
-		std::copy(per_row[r].begin(),
-		          per_row[r].begin() + static_cast<std::ptrdiff_t>(prediction_length * NUM_QUANTILES),
-		          out.begin() + static_cast<std::ptrdiff_t>(r * prediction_length * NUM_QUANTILES));
 	}
 	return out;
 }

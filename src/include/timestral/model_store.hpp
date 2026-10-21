@@ -33,17 +33,18 @@ public:
 	static bool IsCached(ClientContext &context, const ModelManifestEntry &entry);
 
 private:
-	string ResolvePath(ClientContext &context, const ModelManifestEntry &entry);
 	void VerifyCachedFile(FileSystem &fs, const string &path, const ModelManifestEntry &entry);
 	void Download(ClientContext &context, const ModelManifestEntry &entry, const string &target);
 
-	//! Serialises resolving (and downloading) each model size.
-	mutex entry_locks[4];
-	//! Protects `verified_paths` and `sessions`.
+	struct ModelRecord {
+		mutex lock;
+		bool verified = false;
+		shared_ptr<BlockPredictor> predictor;
+	};
+
+	//! Only protects record lookup; file I/O and session construction use the record's lock.
 	mutex lock;
-	//! Paths whose checksum was verified in this process.
-	unordered_set<string> verified_paths;
-	unordered_map<string, shared_ptr<BlockPredictor>> sessions;
+	unordered_map<string, shared_ptr<ModelRecord>> models;
 };
 
 //! Registers the `timestral_*` settings and the `timestral_models()` table function.

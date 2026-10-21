@@ -1,11 +1,10 @@
 # This file is included by DuckDB's build system. It specifies which extension to load
 
-# GCC 14+ / DuckDB v1.5.x: DuckDB tools that link both duckdb_static and the extension objects hit a
-# "multiple definition" error for some constexpr members. Harmless; allow it on Linux (same as anofox_tabfm).
-if(UNIX AND NOT APPLE)
-    list(APPEND DUCKDB_EXTRA_LINK_FLAGS -Wl,--allow-multiple-definition)
-    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--allow-multiple-definition")
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--allow-multiple-definition")
+# Use one language standard for DuckDB and the extension. Mixing DuckDB's C++11
+# out-of-line constexpr definitions with C++17 inline definitions can produce
+# duplicate symbols on GCC (for example string_t::INLINE_LENGTH).
+if(CMAKE_CXX_STANDARD LESS 17)
+    set(CMAKE_CXX_STANDARD 17 CACHE STRING "C++ standard to enforce" FORCE)
 endif()
 
 duckdb_extension_load(timestral
