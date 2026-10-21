@@ -122,7 +122,7 @@ GridSeries BuildGrid(std::vector<std::pair<int64_t, double>> &rows, const GridOp
 		grid.step = InferStep(rows, options.temporal);
 	}
 	if (!grid.step.IsCalendar() && grid.step.width <= 0) {
-		throw InvalidInputException("timestral: freq must be positive");
+		throw InvalidInputException("timestral: EVERY must be positive");
 	}
 	if (grid.step.IsCalendar()) {
 		grid.step.anchor_day = 1;

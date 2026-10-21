@@ -80,7 +80,7 @@ WITH f AS (
 e AS (SELECT * FROM '{d}/{name}_expected.csv'),
 s AS (SELECT series_id, greatest(max(abs(q01)), max(abs(q99)), 1e-6) AS scale FROM e GROUP BY ALL)
 SELECT count(*) = (SELECT count(*) FROM e) AND bool_and({checks} AND f.forecast = f.q50)
-FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY ts) AS step FROM f) f
+FROM (SELECT *, row_number() OVER (PARTITION BY series_id ORDER BY t) AS step FROM f) f
 JOIN e USING (series_id, step)
 JOIN s USING (series_id);
 ----
