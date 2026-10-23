@@ -32,21 +32,24 @@ FROM sales TIMESTRAL_FORECAST (
 
 ## Install
 
-Until it is published as a DuckDB community extension, build it from source (see [Building](#building)) and load
-the resulting `build/release/extension/timestral/timestral.duckdb_extension`:
+`timestral` is a [DuckDB community extension](https://duckdb.org/community_extensions/) for DuckDB 2.0. Install
+and load it with:
 
 ```sql
-LOAD 'build/release/extension/timestral/timestral.duckdb_extension';
+INSTALL timestral FROM community;
+LOAD timestral;
 ```
 
-Once published, it will install with `INSTALL timestral FROM community; LOAD timestral;`.
-
-`LOAD` adds the `TIMESTRAL_FORECAST` syntax to every connection. A connection that was already open, including
-the one running `LOAD`, switches once its current query ends, so send `LOAD timestral` and the first
-`TIMESTRAL_FORECAST` query as two separate statements, not as one string.
+`INSTALL` downloads the signed binary for your platform. `LOAD` adds the `TIMESTRAL_FORECAST` syntax to every
+connection. A connection that was already open, including the one running `LOAD`, switches once its current query
+ends, so send `LOAD timestral` and the first `TIMESTRAL_FORECAST` query as two separate statements, not as one
+string.
 
 On first use the extension downloads the selected model from `https://assets.altertable.ai/timestral/v1/`,
 checks its SHA-256, and caches it in `~/.duckdb/timestral/v1/`.
+
+To build from source instead, see [Building](#building) and load
+`build/release/extension/timestral/timestral.duckdb_extension`.
 
 ## Forecasting
 
