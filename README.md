@@ -45,8 +45,8 @@ connection. A connection that was already open, including the one running `LOAD`
 ends, so send `LOAD timestral` and the first `TIMESTRAL_FORECAST` query as two separate statements, not as one
 string.
 
-On first use the extension downloads the selected model from `https://assets.altertable.ai/timestral/v1/`,
-checks its SHA-256, and caches it in `~/.duckdb/timestral/v1/`.
+On first use the extension downloads the selected model from `https://assets.altertable.ai/timestral/v2/`,
+checks its SHA-256, and caches it in `~/.duckdb/timestral/v2/`.
 
 To build from source instead, see [Building](#building) and load
 `build/release/extension/timestral/timestral.duckdb_extension`.
@@ -145,10 +145,10 @@ column, or `ts` when the time is an expression.
 
 | Size | File | GIFT-Eval MASE ↓ | GIFT-Eval CRPS ↓ | 1,000 series, 2,016 steps of context → 96 steps* |
 |---|---|---|---|---|
-| `5m` (default) | 23 MB | 0.705 | 0.479 | 0.9 s |
-| `28m` | 114 MB | 0.678 | 0.461 | 3.3 s |
-| `123m` | 495 MB | 0.659 | 0.448 | 14 s |
-| `209m` | 842 MB | 0.658 | 0.446 | 25 s |
+| `5m` (default) | 21 MB | 0.705 | 0.479 | 0.7 s |
+| `28m` | 112 MB | 0.678 | 0.461 | 2.7 s |
+| `123m` | 492 MB | 0.659 | 0.448 | 13 s |
+| `209m` | 839 MB | 0.658 | 0.446 | 23 s |
 
 \* Apple M4 Pro, 14 threads. The accuracy figures are Mistral's published GIFT-Eval results.
 
@@ -161,8 +161,8 @@ Forecasts run on DuckDB's own worker threads, one series per task, so `SET threa
 | Setting | Default | Meaning |
 |---|---|---|
 | `timestral_model` | `'5m'` | Default model size. |
-| `timestral_model_url` | `'https://assets.altertable.ai/timestral/v1'` | Where model files are downloaded from. |
-| `timestral_cache_dir` | `'~/.duckdb/timestral/v1'` | Where downloaded models are cached. |
+| `timestral_model_url` | `'https://assets.altertable.ai/timestral/v2'` | Where model files are downloaded from. |
+| `timestral_cache_dir` | `'~/.duckdb/timestral/v2'` | Where downloaded models are cached. |
 | `timestral_model_path` | `''` | A local `.onnx` file to use instead of the download cache. No checksum check. |
 
 ### Offline use

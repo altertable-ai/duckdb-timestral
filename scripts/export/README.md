@@ -18,9 +18,23 @@ checkpoint (`REVISIONS` in `export_onnx.py`), and the torch/onnx/onnxruntime ver
 
 `TimestralModel._predict_context_only`, the single-block forecast without covariates, is exported with dynamic
 rows, context length and horizon patches. Its inputs and outputs are documented at the top of `export_onnx.py`.
-One export-only patch is needed: a boolean `cummax` has no ONNX lowering, so it is replaced by the equivalent
-`cumsum > 0`. Each graph is checked against the unpatched PyTorch model on 6 shapes before anything is
-written. A run fails if the error exceeds 1e-4 of the output scale; the observed worst case is about 4e-5.
+
+The graph targets opset 23 so ONNX Runtime runs attention, RoPE and RMSNorm as single fused CPU kernels
+(`Attention`, `RotaryEmbedding`, `RMSNormalization`) instead of dozens of primitive ops. `export_patches` applies
+the export-only rewrites:
+
+- A boolean `cummax` has no ONNX lowering, so it is replaced by the equivalent `cumsum > 0`.
+- The fused QKV weight rows are reordered from `(qkv, head_dim, heads)` to head-major, so q, k and v are plain
+  slices of one MatMul and need no transposes.
+- Attention and RoPE are traced as custom ops that map to one `Attention` / `RotaryEmbedding` node each.
+- Variate attention is dropped: the extension gives every row its own group id, so each row attends only to
+  itself and the attention output is its value projection. The graph therefore requires distinct group ids.
+
+Each graph is checked against the unpatched PyTorch model on 6 shapes before anything is written. A run fails
+if the error exceeds 1e-4 of the output scale; the observed worst case is about 5e-5 (28m, T=2048).
+
+Against the opset-20 graphs of asset `v1`, the 5m model runs a 2,048-step context block in 5.8 ms instead of
+10 ms, and a 32,768-step one in 96 ms instead of 150 ms (ONNX Runtime CPU, one thread, Apple M4 Pro).
 
 The forecasting wrapper around the graph (`TimestralForecaster`) is ported to C++ in `src/forecaster.cpp`.
 

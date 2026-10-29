@@ -5,7 +5,7 @@
 require timestral
 
 query II
-SELECT count(*), bool_and(url = 'https://assets.altertable.ai/timestral/v1/timestral-' || size || '.onnx') FROM timestral_models();
+SELECT count(*), bool_and(url = 'https://assets.altertable.ai/timestral/v2/timestral-' || size || '.onnx') FROM timestral_models();
 ----
 4	true
 

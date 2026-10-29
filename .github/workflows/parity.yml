@@ -53,7 +53,7 @@ jobs:
       - name: Download the 5M model
         run: |
           mkdir -p models
-          curl --fail --retry 3 -L -o models/timestral-5m.onnx https://assets.altertable.ai/timestral/v1/timestral-5m.onnx
+          curl --fail --retry 3 -L -o models/timestral-5m.onnx https://assets.altertable.ai/timestral/v2/timestral-5m.onnx
           expected=$(grep -o '"5m", "timestral-5m.onnx", "[0-9a-f]*"' src/include/timestral/model_manifest.hpp | grep -o '[0-9a-f]\{64\}')
           echo "${expected}  models/timestral-5m.onnx" | sha256sum --check
 
