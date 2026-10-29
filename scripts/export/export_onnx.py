@@ -5,9 +5,14 @@ patch embedding, masks, transformer, quantile head, denormalization) becomes one
 
     inputs        float32 [rows, T]   T a multiple of 32; unobserved positions hold 0
     observed      bool    [rows, T]
-    group_ids     int64   [rows]      rows with the same id are one series
+    group_ids     int64   [rows]      must be distinct: every row is its own (univariate) series
     horizon_token float32 [H]         dummy; its length is the number of horizon patches (1..32)
     -> quantiles  float32 [rows, H*32, 21]  raw space, sorted along the last axis
+
+The graph is exported at opset 23 with a few rewrites that ONNX Runtime runs faster (see `export_patches`):
+the fused QKV projection is reordered head-major, attention and RoPE become ONNX Attention and
+RotaryEmbedding on 3-D (rows, patches, heads * head_dim) tensors (no transposes), and variate attention is
+dropped because over a single-row series it is the identity on its values.
 
 The forecasting wrapper around it (block rollout, refine frames, capping, symmetric averaging,
 clipping) is ported to C++ in the extension. Every export is checked against PyTorch before it is
@@ -27,11 +32,16 @@ from pathlib import Path
 import numpy as np
 import onnxruntime as ort
 import torch
+import torch.nn.functional as F
+import timestral.layers as timestral_layers
 import timestral.model as timestral_model
 from huggingface_hub import hf_hub_download
+from onnxscript import opset23
 from timestral import TimestralForecaster
 
-ASSET_VERSION = "v1"
+# v2: opset-23 graphs with the export rewrites; v1 files keep their checksums for older extension builds.
+ASSET_VERSION = "v2"
+OPSET = 23
 REVISIONS = {
     "5m": ("mistralai/Timestral-5M", "bdd20cfc15a3fea0e4cb5ccef37f8d3ca7aa335f"),
     "28m": ("mistralai/Timestral-28M", "49b26409ac87b5935539a5d8ffe7f397b720db47"),
@@ -54,14 +64,97 @@ def _key_validity_export(obs_per_patch, attend_missing):
     return obs_per_patch | (obs_per_patch.to(torch.int32).cumsum(dim=-1) > 0)
 
 
+# Attention and RoPE on 3-D (batch, seq, heads * head_dim) tensors, as custom ops so the exporter maps them to
+# single ONNX nodes. The eager implementations are the reference math, used for tracing.
+@torch.library.custom_op("timestral_export::attention", mutates_args=())
+def _attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: torch.Tensor, heads: int) -> torch.Tensor:
+    b, sq, d = q.shape
+    sk = k.shape[1]
+    out = F.scaled_dot_product_attention(q.view(b, sq, heads, d // heads).transpose(1, 2),
+                                         k.view(b, sk, heads, d // heads).transpose(1, 2),
+                                         v.view(b, sk, heads, d // heads).transpose(1, 2), attn_mask=mask)
+    return out.transpose(1, 2).reshape(b, sq, d)
+
+
+@_attention.register_fake
+def _(q, k, v, mask, heads):
+    return torch.empty_like(q)
+
+
+@torch.library.custom_op("timestral_export::rope", mutates_args=())
+def _rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, heads: int) -> torch.Tensor:
+    """Non-interleaved RoPE over whole heads; `cos`/`sin` are `(batch, seq, head_dim / 2)`."""
+    b, s, d = x.shape
+    x4 = x.view(b, s, heads, d // heads)
+    cos2 = torch.cat([cos, cos], dim=-1).unsqueeze(2)
+    sin2 = torch.cat([sin, sin], dim=-1).unsqueeze(2)
+    return (x4 * cos2 + timestral_layers._rotate_half(x4) * sin2).reshape(b, s, d)
+
+
+@_rope.register_fake
+def _(x, cos, sin, heads):
+    return torch.empty_like(x)
+
+
+TRANSLATIONS = {
+    # Attention-23 emits optional present-key/value and qk outputs; only Y is used, so the exporter prunes the rest.
+    torch.ops.timestral_export.attention.default:
+        lambda q, k, v, mask, heads: opset23.Attention(q, k, v, mask, q_num_heads=heads, kv_num_heads=heads)[0],
+    torch.ops.timestral_export.rope.default:
+        lambda x, cos, sin, heads: opset23.RotaryEmbedding(x, cos, sin, num_heads=heads, interleaved=0),
+}
+
+
+def _attention_forward(self, x, mask, cos, sin):
+    """`layers.Attention.forward` on head-major QKV weights (see `export_patches`), with the same math."""
+    d, heads = self.embed_dim, self.num_heads
+    if not self.is_time:
+        # Every row is its own series, so the variate mask is the diagonal: softmax over one key is 1 and the
+        # attention output is v itself.
+        out = F.linear(x, self.wQKV.weight[2 * d:])
+        if self._gate is not None:
+            out = out * self._gate(x).sigmoid()
+        return self.wO(out)
+    q, k, v = self.wQKV(x).split(d, dim=-1)
+    half = d // heads // 2
+    q = torch.ops.timestral_export.rope(q, cos[..., :half], sin[..., :half], heads)
+    k = torch.ops.timestral_export.rope(k, cos[..., :half], sin[..., :half], heads)
+    if isinstance(mask, timestral_layers.TwoStreamMask):
+        n = mask.enc_len
+        out = torch.cat([torch.ops.timestral_export.attention(q[:, :n], k[:, :n], v[:, :n], mask.mask[:, :, :n, :n], heads),
+                         torch.ops.timestral_export.attention(q[:, n:], k, v, mask.mask[:, :, n:, :], heads)], dim=1)
+    else:
+        out = torch.ops.timestral_export.attention(q, k, v, mask, heads)
+    if self._gate is not None:
+        out = out * self._gate(x).sigmoid()
+    return self.wO(out)
+
+
 @contextlib.contextmanager
-def export_patches():
-    original = timestral_model.compute_enc_key_validity
+def export_patches(model):
+    """Graph rewrites for the export, undone on exit so verification runs the unpatched reference.
+
+    The fused QKV weight rows are laid out `(qkv, head_dim, heads)`; reordering them to `(qkv, heads, head_dim)`
+    makes q, k and v plain head-major slices of one MatMul (same dot products) instead of a 5-D permute.
+    """
+    original_validity = timestral_model.compute_enc_key_validity
+    original_forward = timestral_layers.Attention.forward
+    saved = {}
     timestral_model.compute_enc_key_validity = _key_validity_export
     try:
+        for name, module in model.named_modules():
+            if isinstance(module, timestral_layers.Attention):
+                d, heads = module.embed_dim, module.num_heads
+                saved[name] = module.wQKV.weight.data
+                module.wQKV.weight.data = saved[name].view(3, d // heads, heads, d).permute(0, 2, 1, 3).reshape(3 * d, d).contiguous()
+        timestral_layers.Attention.forward = _attention_forward
         yield
     finally:
-        timestral_model.compute_enc_key_validity = original
+        timestral_layers.Attention.forward = original_forward
+        timestral_model.compute_enc_key_validity = original_validity
+        for name, module in model.named_modules():
+            if name in saved:
+                module.wQKV.weight.data = saved[name]
 
 
 class PredictBlock(torch.nn.Module):
@@ -85,14 +178,15 @@ def export_graph(model, path: Path) -> None:
         "patches": torch.export.Dim("patches", min=1, max=1024),
         "horizon": torch.export.Dim("horizon", min=1, max=32),
     }
-    with export_patches(), torch.inference_mode():
+    with export_patches(model), torch.inference_mode():
         program = torch.onnx.export(
             wrapper,
             example,
             dynamo=True,
-            opset_version=20,
+            opset_version=OPSET,
             input_names=INPUT_NAMES,
             output_names=OUTPUT_NAMES,
+            custom_translation_table=TRANSLATIONS,
             dynamic_shapes={
                 "inputs": {0: dims["rows"], 1: 32 * dims["patches"]},
                 "observed": {0: dims["rows"], 1: 32 * dims["patches"]},
@@ -100,7 +194,9 @@ def export_graph(model, path: Path) -> None:
                 "horizon_token": {0: dims["horizon"]},
             },
         )
-    program.save(str(path))
+        # Initializers are read from the module's parameters when saving, so save before the patches undo the
+        # reordered QKV weights.
+        program.save(str(path))
 
 
 def verify_graph(model, path: Path) -> None:
