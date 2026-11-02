@@ -15,8 +15,8 @@
 namespace duckdb {
 namespace timestral {
 
-static constexpr const char *DEFAULT_MODEL_URL = "https://assets.altertable.ai/timestral/v1";
-static constexpr const char *DEFAULT_CACHE_DIR = "~/.duckdb/timestral/v1";
+static constexpr const char *DEFAULT_MODEL_URL = "https://assets.altertable.ai/timestral/v2";
+static constexpr const char *DEFAULT_CACHE_DIR = "~/.duckdb/timestral/v2";
 static constexpr idx_t DOWNLOAD_CHUNK = 8 * 1024 * 1024;
 
 string GetStringSetting(ClientContext &context, const string &name) {

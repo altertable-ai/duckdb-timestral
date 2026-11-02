@@ -13,8 +13,8 @@ class BlockPredictor {
 public:
 	virtual ~BlockPredictor() = default;
 	//! `inputs`/`observed` are `rows * t` row-major, `t` a multiple of the patch size; unobserved inputs are 0.
-	//! Rows sharing a group id are one series. Returns raw-space quantiles,
-	//! `rows * (horizon_patches * patch_size) * NUM_QUANTILES` floats, sorted along the quantile axis.
+	//! Group ids must be distinct: the exported graph treats every row as its own series. Returns raw-space
+	//! quantiles, `rows * (horizon_patches * patch_size) * NUM_QUANTILES` floats, sorted along the quantile axis.
 	virtual std::vector<float> PredictBlock(const std::vector<float> &inputs, const std::vector<uint8_t> &observed,
 	                                        const std::vector<int64_t> &group_ids, idx_t rows, idx_t t,
 	                                        idx_t horizon_patches) = 0;
