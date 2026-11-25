@@ -7,11 +7,13 @@ if(VCPKG_TARGET_IS_OSX OR VCPKG_TARGET_IS_IOS)
     endif()
 endif()
 
+# github.com/microsoft/onnxruntime returns 404 since November 2026, so the source comes from Intel's fork, pinned
+# to the v1.29.0 commit (the fork has no release tags). Its tree is identical to the upstream v1.29.0 tag archive.
 vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
-    REPO microsoft/onnxruntime
-    REF "v${VERSION}"
-    SHA512 9ea05f5279fc93fd243a967f3664aaabe9216f6e3ce9358ead662653984476e9cb0cb950947f31f8602541224c946a3ceac91d7c1990ffe2b8314d61361c300f
+    REPO intel/onnxruntime
+    REF 2e2543fbe9fae542f921d47a72d21d5a4ef0b710 # v1.29.0
+    SHA512 eab35d11d7ab28bc7bdd33803ab37409375da5b95c50e3654e29a234fb2d2d2db05edb9747d9aa77b0d1b8660ead70f7e77ce482586aac4120230e95edaab193
     PATCHES
         fix-cmake.patch # .framework install, re2 -pthread override (WASM)
         fix-cmake-cuda.patch # vcpkg-provided cudnn_frontend/cutlass instead of ORT's own FetchContent
